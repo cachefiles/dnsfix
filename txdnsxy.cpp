@@ -157,19 +157,64 @@ u_char * dns_copy_value(u_char *outp, void * valp, size_t count)
 	return (outp + count);
 }
 
-char * dns_strip_tail(char *name, const char *tail)
+int __unmap_code(int c)
+{
+	int cc = (c & 0xFF);
+
+	if ('A' <= cc && cc <= 'Z') {
+		return 'A' + (cc - 'A' + 26 - 7) % 26;
+	}
+
+	if ('a' <= cc && cc <= 'z') {
+		return 'a' + (cc - 'a' + 26 - 7) % 26;
+	}
+
+	return cc;
+}
+
+int __map_code(int c)
+{
+	int cc = (c & 0xFF);
+
+	if ('A' <= cc && cc <= 'Z') {
+		return 'A' + (cc - 'A' + 7) % 26;
+	}
+
+	if ('a' <= cc && cc <= 'z') {
+		return 'a' + (cc - 'a' + 7) % 26;
+	}
+
+	return cc;
+}
+
+void encrypt_domain(char *dst, const char *src)
+{
+	char *d = dst;
+	const char *s = src;
+
+	while (*s) {
+		*d++ = __unmap_code(*s);
+		s++;
+	}
+
+	strcpy(d, SUFFIXES);
+	return;
+}
+
+char * decrypt_domain(char *name)
 {
 	char *n = name;
 	size_t ln = -1;
-	size_t lt = strlen(tail);
+	size_t lt = strlen(SUFFIXES);
 
 	if (n == NULL || *n == 0) {
 		return NULL;
 	}
 
 	ln = strlen(n);
-	if (lt < ln && strcmp(n + ln - lt, tail) == 0) {
+	if (lt < ln && strcmp(n + ln - lt, SUFFIXES) == 0) {
 		n[ln - lt] = 0;
+		for (int l = 0; l < ln - lt; l++) n[l] = __map_code(n[l]);
 		return name;
 	}
 
@@ -251,6 +296,38 @@ u_char *dns_auth_addNS(u_char *outp, const char *domain, int nsttl, u_short nscl
 	return outp;
 }
 
+u_char *dns_addon_addSOA(u_char *outp, const char *domain, int nsttl, u_short nscls, const char *nsserver, const char *email, int ttls[5])
+{
+	u_char *mark, *lenp;
+	u_short nslen = 0;
+	u_short nstype = NSTYPE_SOA;
+
+	nsttl = htonl(nsttl);
+	nscls = htons(nscls);
+	nstype = htons(nstype);
+
+	outp = dns_copy_name(outp, domain);
+	outp = dns_copy_value(outp, &nstype, sizeof(nstype));
+	outp = dns_copy_value(outp, &nscls, sizeof(nscls));
+	outp = dns_copy_value(outp, &nsttl, sizeof(nsttl));
+
+	lenp = outp;
+	outp = dns_copy_value(outp, &nslen, sizeof(nslen));
+	mark = outp;
+	outp = dns_copy_name(outp, nsserver);
+	outp = dns_copy_name(outp, email);
+
+	for (int i = 0; i < 5; i++) {
+		nsttl= htonl(ttls[i]);
+		outp = dns_copy_value(outp, &nsttl, sizeof(nsttl));
+	}
+
+	nslen = htons(outp - mark);
+	dns_copy_value(lenp, &nslen, sizeof(nslen));
+
+	return outp;
+}
+
 u_char *dns_addon_addA(u_char *outp, const char *server, int nsttl, u_short nscls, u_int v4addr)
 {
 	u_short nslen = 0;
@@ -293,10 +370,10 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 		if (htons(type) == 0x05) {
 			if (trace) {
 				strcpy(__rr_name, name);
-				strcat(name, SUFFIXES);
+				encrypt_domain(name, __rr_name);
 			} else {
 				strcpy(__rr_name, name);
-				dns_strip_tail(name, SUFFIXES);
+				decrypt_domain(name);
 			}
 
 			if (strcmp(detail, name) == 0) {
@@ -304,7 +381,7 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 				return plen;
 			}
 		}
-		TX_PRINT(TXL_DEBUG, "%s: %s %s", htons(type)==0x05? "CNAME": "NS", detail, name);
+		//TX_PRINT(TXL_DEBUG, "%s: %s %s", htons(type)==0x05? "CNAME": "NS", detail, name);
 		snprintf(__rr_desc, sizeof(__rr_desc), "%s", name);
 
 		outp = dns_copy_name(outp, name);
@@ -326,7 +403,8 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 		outp = dns_copy_name(outp, name);
 
 		outp = dns_copy_value(outp, d, limit - d);
-		TX_PRINT(TXL_DEBUG, "MX %s %s %d", detail, name, htons(prival));
+		//TX_PRINT(TXL_DEBUG, "MX %s %s %d", detail, name, htons(prival));
+		snprintf(__rr_desc, sizeof(__rr_desc), "MX %s", name);
 
 		dnslen = htons(outp - mark);
 		dns_copy_value(plen, &dnslen, sizeof(dnslen));
@@ -346,7 +424,8 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 		outp = dns_copy_name(outp, name);
 
 		outp = dns_copy_value(outp, d, limit - d);
-		TX_PRINT(TXL_DEBUG, "SOA %s %s %s", detail, alias, name);
+		//TX_PRINT(TXL_DEBUG, "SOA %s %s %s", detail, alias, name);
+		snprintf(__rr_desc, sizeof(__rr_desc), "SOA %s %s", alias, name);
 
 		dnslen = htons(outp - mark);
 		dns_copy_value(plen, &dnslen, sizeof(dnslen));
@@ -357,7 +436,7 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 		htons(type) == NSTYPE_A && strcpy(nstype, "A");
 		htons(type) == NSTYPE_OPT && strcpy(nstype, "OPT");
 		htons(type) == NSTYPE_AAAA && strcpy(nstype, "AAAA");
-		TX_PRINT(TXL_DEBUG, "%s %s", nstype, detail);
+		//TX_PRINT(TXL_DEBUG, "%s %s", nstype, detail);
 		snprintf(__rr_desc, sizeof(__rr_desc), "");
 		outp = dns_copy_value(outp, &dnslen, sizeof(dnslen));
 		outp = dns_copy_value(outp, pkt->cursor, count);
@@ -635,7 +714,7 @@ int get_suffixes_forward(char *dnsdst, size_t dstlen, const char *dnssrc, size_t
 
 		DNSFMT_CHECK(&dns_pkt, 0);
 
-		if (!dns_strip_tail(name, SUFFIXES)) {
+		if (!decrypt_domain(name)) {
 			TX_PRINT(TXL_DEBUG, "not allow %s %s", name, dns_type(htons(type)));
 			return 0;
 		}
@@ -670,7 +749,7 @@ int get_suffixes_forward(char *dnsdst, size_t dstlen, const char *dnssrc, size_t
 
 		DNSFMT_CHECK(&dns_pkt, 0);
 
-		dns_strip_tail(name, SUFFIXES);
+		decrypt_domain(name);
 		marker0 = dst_buf;
 		dst_buf = dns_copy_name(dst_buf, name);
 		dst_buf = dns_copy_value(dst_buf, &type, sizeof(type));
@@ -795,7 +874,7 @@ int get_suffixes_backward(char *dnsdst, size_t dstlen, const char *dnssrc, size_
 		wrap += sprintf(wrap, "%s", name);
 		wrap++; *wrap = 0;
 
-		snprintf(shname, sizeof(shname), SUFFIXES_FORMAT, name);
+		encrypt_domain(shname, name);
 		TX_PRINT(TXL_DEBUG, "backward suffixes name: %s, type %d, class %d ", shname, htons(type), htons(dnscls));
 		dst_buf = dns_copy_name(dst_buf, shname);
 		dst_buf = dns_copy_value(dst_buf, &type, sizeof(type));
@@ -832,7 +911,7 @@ int get_suffixes_backward(char *dnsdst, size_t dstlen, const char *dnssrc, size_
 
 	if (!trace_cname) {
 		char cname[128];
-		sprintf(cname, "%s%s", wrap_name_list, SUFFIXES);
+		encrypt_domain(cname, wrap_name_list);
 
 		dnsttl   = 8000;
 		dnscls	= NSCLASS_INET;
@@ -857,7 +936,9 @@ int get_suffixes_backward(char *dnsdst, size_t dstlen, const char *dnssrc, size_
 		cursor_mark = dns_pkt.cursor + htons(dnslen);
 
 		if (trace_cname && in_list(wrap_name_list, name)) {
-			strcat(name, SUFFIXES);
+			char tmpname[128];
+			strcpy(tmpname, name);
+			encrypt_domain(name, tmpname);
 		}
 
 		dst_buf = dns_copy_name(dst_buf, name);
@@ -885,6 +966,7 @@ int get_suffixes_backward(char *dnsdst, size_t dstlen, const char *dnssrc, size_
 int self_query_hook(int outfd, const char *buf, size_t count, struct sockaddr_in *from)
 {
 	int nsttl = 0;
+	int dns_rcode = 0;
 	unsigned short nscls = 0;
 	unsigned short nstype = 0;
 	char name[256], shname[256];
@@ -908,7 +990,7 @@ int self_query_hook(int outfd, const char *buf, size_t count, struct sockaddr_in
 	dns_pkt.limit = (u_char *)(buf + count);
 	dns_pkt.cursor = (u_char *)(buf + sizeof(head));
 
-	char *test;
+	char *test, *last;
 	for (int i = 0; i < head.q_qdcount; i++) {
 		dns_extract_name(&dns_pkt, dns_pkt.limit, name, sizeof(name));
 		dns_extract_value(&dns_pkt, dns_pkt.limit, &nstype, sizeof(nstype));
@@ -916,9 +998,17 @@ int self_query_hook(int outfd, const char *buf, size_t count, struct sockaddr_in
 		DNSFMT_CHECK(&dns_pkt, 1);
 
 		strcpy(shname, name);
-		test = dns_strip_tail(shname, SUFFIXES);
-		if (test && strchr(shname, '.') != NULL) return 0;
+		test = decrypt_domain(shname);
 		if (!test && strcmp(shname, SUFFIXES + 1) != 0) return 1;
+		if (test != NULL) {
+			last = strrchr(shname, '.');
+			dns_rcode = RCODE_NXDOMAIN;
+			if (last == NULL) {
+				dns_rcode = RCODE_NXDOMAIN;
+			} else if (isalpha(last[1])) {
+				return 0;
+			}
+		}
 
 		dst = dns_copy_name(dst, name);
 		dst = dns_copy_value(dst, &nstype, sizeof(nstype));
@@ -940,17 +1030,24 @@ int self_query_hook(int outfd, const char *buf, size_t count, struct sockaddr_in
 		dst = dns_addon_addA(dst, name, nsttl, htons(nscls), from->sin_addr.s_addr);
 		head.q_ancount++;
 	} else {
-		head.q_flags |= RCODE_NXDOMAIN;
-		TX_PRINT(TXL_DEBUG, "fake CNAME response %s %s %s", name, dns_type(htons(nstype)), inet_ntoa(from->sin_addr));
+		head.q_flags |= dns_rcode;
+		TX_PRINT(TXL_DEBUG, "fake response %s %s %s", name, dns_type(htons(nstype)), inet_ntoa(from->sin_addr));
 #if 0
 		dst = dns_answ_addCNAME(dst, name, nsttl, htons(nscls), test? test: "www.baidu.com");
 		head.q_ancount++;
 #endif
 	}
 
+	if (dns_rcode == RCODE_NXDOMAIN) {
+		int ttls[5] = {0xdeffbeef, 1800, 1800, 36000, 3600};
+		dst = dns_addon_addSOA(dst, name, nsttl, htons(nscls), "ns1.keziwo.com", "pagxir.gmail.com", ttls);
+		head.q_nscount++;
+	}
+
 	head.q_flags = htons(head.q_flags);
 	head.q_ancount = htons(head.q_ancount);
 	head.q_arcount = htons(head.q_arcount);
+	head.q_nscount = htons(head.q_nscount);
 	head.q_qdcount = htons(head.q_qdcount);
 	memcpy(tmp, &head, sizeof(head));
 	sendto(outfd, (char *)tmp, dst - tmp, 0, (struct sockaddr *)from, sizeof(*from));
@@ -1025,7 +1122,7 @@ static void do_dns_udp_recv(void *upp)
 
 	while (tx_readable(&up->file)) {
 		in_len1 = sizeof(in_addr1);
-		count = recvfrom(up->sockfd, buf, sizeof(buf), 01,
+		count = recvfrom(up->sockfd, buf, sizeof(buf), 0,
 				(struct sockaddr *)&in_addr1, &in_len1);
 		tx_aincb_update(&up->file, count);
 		if (count < 12) {

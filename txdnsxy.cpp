@@ -22,6 +22,7 @@
 	if (expr); else { printf msgfmt; dpt->err = 1; return 0; } \
 } while ( 0 )
 
+static int _is_client = 0;
 static char SUFFIXES[128] = ".n.yiz.me";
 static char SUFFIXES_FORMAT[128] = "%s.n.yiz.me";
 
@@ -439,7 +440,18 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 		//TX_PRINT(TXL_DEBUG, "%s %s", nstype, detail);
 		snprintf(__rr_desc, sizeof(__rr_desc), "");
 		outp = dns_copy_value(outp, &dnslen, sizeof(dnslen));
-		outp = dns_copy_value(outp, pkt->cursor, count);
+		// outp = dns_copy_value(outp, pkt->cursor, count);
+
+		if (htons(type) == NSTYPE_A && strstr(detail, SUFFIXES)) {
+			int i;
+			char t[8];
+			memcpy(t, pkt->cursor, count);
+			for (i = 0; i < count; i++) t[i] ^= 0x5a;
+			outp = dns_copy_value(outp, t, count);
+		} else {
+			printf("name ns: %s\n", detail);
+			outp = dns_copy_value(outp, pkt->cursor, count);
+		}
 	}
 
 	return outp;
@@ -714,7 +726,7 @@ int get_suffixes_forward(char *dnsdst, size_t dstlen, const char *dnssrc, size_t
 
 		DNSFMT_CHECK(&dns_pkt, 0);
 
-		if (!decrypt_domain(name)) {
+		if (!decrypt_domain(name) && 0) {
 			TX_PRINT(TXL_DEBUG, "not allow %s %s", name, dns_type(htons(type)));
 			return 0;
 		}
@@ -749,9 +761,13 @@ int get_suffixes_forward(char *dnsdst, size_t dstlen, const char *dnssrc, size_t
 
 		DNSFMT_CHECK(&dns_pkt, 0);
 
-		decrypt_domain(name);
 		marker0 = dst_buf;
-		dst_buf = dns_copy_name(dst_buf, name);
+		{
+			char tmpname[512];
+			strcpy(tmpname, name);
+			decrypt_domain(tmpname);
+			dst_buf = dns_copy_name(dst_buf, tmpname);
+		}
 		dst_buf = dns_copy_value(dst_buf, &type, sizeof(type));
 		dst_buf = dns_copy_value(dst_buf, &dnscls, sizeof(dnscls));
 		dst_buf = dns_copy_value(dst_buf, &dnsttl, sizeof(dnsttl));
@@ -875,8 +891,9 @@ int get_suffixes_backward(char *dnsdst, size_t dstlen, const char *dnssrc, size_
 		wrap++; *wrap = 0;
 
 		encrypt_domain(shname, name);
-		TX_PRINT(TXL_DEBUG, "backward suffixes name: %s, type %d, class %d ", shname, htons(type), htons(dnscls));
-		dst_buf = dns_copy_name(dst_buf, shname);
+		TX_PRINT(TXL_DEBUG, "backward suffixes name: %s(%s), %d, type %d, class %d ", shname, name, is_fakedn(name), htons(type), htons(dnscls));
+		// dst_buf = dns_copy_name(dst_buf, shname);
+		dst_buf = dns_copy_name(dst_buf, _is_client == 0 || is_fakedn(name)? shname: name);
 		dst_buf = dns_copy_value(dst_buf, &type, sizeof(type));
 		dst_buf = dns_copy_value(dst_buf, &dnscls, sizeof(dnscls));
 
@@ -1225,11 +1242,13 @@ void suffixes_config(int isclient, const char *suffixes)
 		dns_tr_request = get_suffixes_backward;
 		dns_tr_response = get_suffixes_forward;
 		dns_query_hook  = none_query_hook;
+		_is_client = 1;
 	} else {
 		TX_PRINT(TXL_DEBUG, "server mode");
 		dns_tr_request = get_suffixes_forward;
 		dns_tr_response = get_suffixes_backward;
 		dns_query_hook  = self_query_hook;
+		_is_client = 0;
 	}
 
 	return;

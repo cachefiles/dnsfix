@@ -2,9 +2,15 @@ RMR ?=rm -f
 RANLIB ?=ranlib
 
 LDLIBS += -lstdc++
-#CFLAGS += -Iinclude -D__BSD_VISIBLE -D_KERNEL -g
 CFLAGS += -Ilibtx/include -D_ENABLE_INET6_
 CXXFLAGS += $(CFLAGS)
+
+ifneq ($(TARGET),)
+CC := $(TARGET)-gcc
+LD := $(TARGET)-ld
+AR := $(TARGET)-ar
+CXX := $(TARGET)-g++
+endif
 
 BUILD_TARGET := "UNKOWN"
 

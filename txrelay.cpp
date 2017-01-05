@@ -16,7 +16,7 @@
 #define closesocket close
 #endif
 
-#include "txall.h"
+#include <txall.h>
 #include "txconfig.h"
 
 struct uptick_task {

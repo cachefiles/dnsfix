@@ -1,9 +1,5 @@
-RMR ?=rm -f
-RANLIB ?=ranlib
-
-LDLIBS += -lstdc++
-CFLAGS += -Ilibtx/include -D_ENABLE_INET6_
-CXXFLAGS += $(CFLAGS)
+MODULE := tcpup
+THIS_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 ifneq ($(TARGET),)
 CC := $(TARGET)-gcc
@@ -12,46 +8,39 @@ AR := $(TARGET)-ar
 CXX := $(TARGET)-g++
 endif
 
-BUILD_TARGET := "UNKOWN"
-
-ifeq ($(LOGNAME),)
-BUILD_TARGET := "mingw"
-else
-BUILD_TARGET := $(findstring mingw, $(CC))
-endif
-
-ifeq ($(BUILD_TARGET),)
-BUILD_TARGET := $(shell uname)
-endif
+LOCAL_CXXFLAGS := -I$(THIS_PATH)/libtx/include -I$(THIS_PATH) -D_ENABLE_INET6_
+LOCAL_CFLAGS := $(LOCAL_CXXFLAGS)
+LOCAL_LDLIBS := -lstdc++
 
 ifeq ($(BUILD_TARGET), mingw)
-TARGETS = txrelay.exe
-LDLIBS += -lws2_32
-else
-TARGETS = txrelay
+LOCAL_LDFLAGS += -static
+LOCAL_LDLIBS += -lws2_32
 endif
 
 ifeq ($(BUILD_TARGET), Linux)
-LDLIBS += -lrt
+LOCAL_LDLIBS += -lrt
 endif
 
-OBJECTS = libtx.a
-XCLEANS = txcat.o ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o
-VPATH  += libtx
+LOCAL_CFLAGS += -g -Wall -Wno-sign-compare -I.
+LOCAL_CXXFLAGS += -g -Wall -Wno-sign-compare -I.
 
-all: $(TARGETS)
+VPATH := $(THIS_PATH)/libtx:$(THIS_PATH)
 
-libtx/libtx.a:
-	make -C libtx
+LOCAL_TARGETS = relaydns
 
-txrelay.exe: txrelay.o base64.o ncatutil.o txdnsxy.o txconfig.o $(OBJECTS)
-	$(CC) $(LDFLAGS) -o txrelay.exe $^ $(LDLIBS)
+all: $(LOCAL_TARGETS)
+CFLAGS := $(LOCAL_CFLAGS)
+CXXFLAGS := $(LOCAL_CXXFLAGS)
 
-txrelay: txrelay.o base64.o txdnsxy.o txconfig.o $(OBJECTS)
-	$(CC) $(LDFLAGS) -o txrelay.exe $^ $(LDLIBS)
+LDLIBS := $(LOCAL_LDLIBS)
+LDFLAGS := $(LOCAL_LDFLAGS)
+OBJECTS := libtx.a ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o
 
-.PHONY: clean
+relaydns.exe: relaydns
+	cp $< $@
 
-clean:
-	$(RM) $(OBJECTS) $(TARGETS) $(XCLEANS)
+relaydns: OBJECTS := $(OBJECTS)
+relaydns: $(OBJECTS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
+include $(THIS_PATH)/libtx/Makefile

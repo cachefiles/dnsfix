@@ -1,4 +1,4 @@
-MODULE := tcpup
+MODULE := dnsfix
 THIS_PATH := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 ifneq ($(TARGET),)
@@ -11,6 +11,10 @@ endif
 LOCAL_CXXFLAGS := -I$(THIS_PATH)/libtx/include -I$(THIS_PATH) -D_ENABLE_INET6_
 LOCAL_CFLAGS := $(LOCAL_CXXFLAGS)
 LOCAL_LDLIBS := -lstdc++
+
+ifeq ($(BUILD_TARGET), )
+BUILD_TARGET:=$(shell uname)
+endif
 
 ifeq ($(BUILD_TARGET), mingw)
 LOCAL_LDFLAGS += -static
@@ -26,7 +30,7 @@ LOCAL_CXXFLAGS += -g -Wall -Wno-sign-compare -I.
 
 VPATH := $(THIS_PATH)/libtx:$(THIS_PATH)
 
-LOCAL_TARGETS = relaydns
+LOCAL_TARGETS = dnsfix
 
 all: $(LOCAL_TARGETS)
 CFLAGS := $(LOCAL_CFLAGS)
@@ -34,13 +38,13 @@ CXXFLAGS := $(LOCAL_CXXFLAGS)
 
 LDLIBS := $(LOCAL_LDLIBS)
 LDFLAGS := $(LOCAL_LDFLAGS)
-OBJECTS := libtx.a ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o
+OBJECTS := ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o
 
-relaydns.exe: relaydns
+dnsfix.exe: dnsfix
 	cp $< $@
 
-relaydns: OBJECTS := $(OBJECTS)
-relaydns: $(OBJECTS)
+dnsfix: OBJECTS := $(OBJECTS)
+dnsfix: $(OBJECTS) libtx.a 
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 include $(THIS_PATH)/libtx/Makefile

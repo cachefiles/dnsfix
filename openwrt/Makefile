@@ -5,7 +5,7 @@
 include $(TOPDIR)/rules.mk
 
 # Name and release number of this package
-PKG_NAME := txrelay
+PKG_NAME := dnsfix
 PKG_RELEASE := 1
 
 
@@ -20,15 +20,15 @@ include $(INCLUDE_DIR)/package.mk
 # If you are running Kamikaze, delete the DESCRIPTION
 # variable below and uncomment the Kamikaze define
 # directive for the description below
-define Package/txrelay
-	TITLE := txrelay -- do dns smart forward
+define Package/dnsfix
+	TITLE := dnsfix -- do dns smart forward
 	SECTION := utils
 	CATEGORY := Utilities
 	DEPENDS := +libstdcpp +librt
 endef
 
 # Uncomment portion below for Kamikaze and delete DESCRIPTION variable above
-define Package/txrelay/description
+define Package/dnsfix/description
 	If you can't figure out what this program does, you're probably
 	brain-dead and need immediate medical attention.
 endef
@@ -53,12 +53,12 @@ endef
 # directory if it does not already exist.  Likewise $(INSTALL_BIN) contains the
 # command to copy the binary file from its current location (in our case the build
 # directory) to the install directory.
-define Package/txrelay/install
+define Package/dnsfix/install
 	$(INSTALL_DIR) $(1)/bin
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/txrelay $(1)/bin/
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/dnsfix $(1)/bin/
 endef
 
 # This line executes the necessary commands to compile our program.
 # The above define directives specify all the information needed, but this
 # line calls BuildPackage which in turn actually uses this information to build a package.
-$(eval $(call BuildPackage,txrelay))
+$(eval $(call BuildPackage,dnsfix))

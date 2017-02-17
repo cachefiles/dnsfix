@@ -32,7 +32,7 @@ VPATH := $(THIS_PATH)/libtx:$(THIS_PATH)
 
 LOCAL_TARGETS = dnsfix
 
-all: $(LOCAL_TARGETS)
+all: $(LOCAL_TARGETS) stunc
 CFLAGS := $(LOCAL_CFLAGS)
 CXXFLAGS := $(LOCAL_CXXFLAGS)
 
@@ -45,6 +45,9 @@ dnsfix.exe: dnsfix
 
 dnsfix: OBJECTS := $(OBJECTS)
 dnsfix: $(OBJECTS) libtx.a 
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+stunc: stunutil.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 include $(THIS_PATH)/libtx/Makefile

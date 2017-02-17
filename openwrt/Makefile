@@ -55,6 +55,7 @@ endef
 # directory) to the install directory.
 define Package/dnsfix/install
 	$(INSTALL_DIR) $(1)/bin
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/stunc $(1)/bin/
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/dnsfix $(1)/bin/
 endef
 

@@ -378,11 +378,11 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 			}
 
 			if (strcmp(detail, name) == 0) {
-				TX_PRINT(TXL_DEBUG, "ignore CNAME %s", detail);
+				LOG_DEBUG("ignore CNAME %s", detail);
 				return plen;
 			}
 		}
-		//TX_PRINT(TXL_DEBUG, "%s: %s %s", htons(type)==0x05? "CNAME": "NS", detail, name);
+		//LOG_DEBUG("%s: %s %s", htons(type)==0x05? "CNAME": "NS", detail, name);
 		snprintf(__rr_desc, sizeof(__rr_desc), "%s", name);
 
 		outp = dns_copy_name(outp, name);
@@ -404,7 +404,7 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 		outp = dns_copy_name(outp, name);
 
 		outp = dns_copy_value(outp, d, limit - d);
-		//TX_PRINT(TXL_DEBUG, "MX %s %s %d", detail, name, htons(prival));
+		//LOG_DEBUG("MX %s %s %d", detail, name, htons(prival));
 		snprintf(__rr_desc, sizeof(__rr_desc), "MX %s", name);
 
 		dnslen = htons(outp - mark);
@@ -425,7 +425,7 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 		outp = dns_copy_name(outp, name);
 
 		outp = dns_copy_value(outp, d, limit - d);
-		//TX_PRINT(TXL_DEBUG, "SOA %s %s %s", detail, alias, name);
+		//LOG_DEBUG("SOA %s %s %s", detail, alias, name);
 		snprintf(__rr_desc, sizeof(__rr_desc), "SOA %s %s", alias, name);
 
 		dnslen = htons(outp - mark);
@@ -437,7 +437,7 @@ u_char * dns_convert_value(struct dns_decode_packet *pkt, size_t count, int trac
 		htons(type) == NSTYPE_A && strcpy(nstype, "A");
 		htons(type) == NSTYPE_OPT && strcpy(nstype, "OPT");
 		htons(type) == NSTYPE_AAAA && strcpy(nstype, "AAAA");
-		//TX_PRINT(TXL_DEBUG, "%s %s", nstype, detail);
+		//LOG_DEBUG("%s %s", nstype, detail);
 		snprintf(__rr_desc, sizeof(__rr_desc), "");
 		outp = dns_copy_value(outp, &dnslen, sizeof(dnslen));
 		// outp = dns_copy_value(outp, pkt->cursor, count);
@@ -716,7 +716,7 @@ int get_suffixes_forward(char *dnsdst, size_t dstlen, const char *dnssrc, size_t
 	dst_limit = (u_char *)(dnsdst + dstlen);
 
 	flag = htons(dns_srcp->q_flags);
-	TX_PRINT(TXL_DEBUG, "get_suffixes_forward nsflag %x", flag);
+	LOG_DEBUG("get_suffixes_forward nsflag %x", flag);
 	dns_dstp[0] = dns_srcp[0];
 	for (int i = 0; i < htons(dns_srcp->q_qdcount); i++) {
 		strcpy(name, "");
@@ -727,7 +727,7 @@ int get_suffixes_forward(char *dnsdst, size_t dstlen, const char *dnssrc, size_t
 		DNSFMT_CHECK(&dns_pkt, 0);
 
 		if (!decrypt_domain(name) && 0) {
-			TX_PRINT(TXL_DEBUG, "not allow %s %s", name, dns_type(htons(type)));
+			LOG_DEBUG("not allow %s %s", name, dns_type(htons(type)));
 			return 0;
 		}
 
@@ -736,7 +736,7 @@ int get_suffixes_forward(char *dnsdst, size_t dstlen, const char *dnssrc, size_t
 			flag |= 0x100;
 		}
 
-		TX_PRINT(TXL_DEBUG, "forward suffixes name: %s, type %d, class %d ", name, htons(type), htons(dnscls));
+		LOG_DEBUG("forward suffixes name: %s, type %d, class %d ", name, htons(type), htons(dnscls));
 		dst_buf = dns_copy_name(dst_buf, name);
 		dst_buf = dns_copy_value(dst_buf, &type, sizeof(type));
 		dst_buf = dns_copy_value(dst_buf, &dnscls, sizeof(dnscls));
@@ -870,7 +870,7 @@ int get_suffixes_backward(char *dnsdst, size_t dstlen, const char *dnssrc, size_
 	dst_buf  = (u_char *)(dns_dstp + 1);
 	dst_limit = (u_char *)(dnsdst + dstlen);
 
-	TX_PRINT(TXL_DEBUG, "get_suffixes_backward nsflag %x", htons(dns_srcp->q_flags));
+	LOG_DEBUG("get_suffixes_backward nsflag %x", htons(dns_srcp->q_flags));
 
 	int trace_cname = 1;
 	char  wrap_name_list[1080];
@@ -891,7 +891,7 @@ int get_suffixes_backward(char *dnsdst, size_t dstlen, const char *dnssrc, size_
 		wrap++; *wrap = 0;
 
 		encrypt_domain(shname, name);
-		TX_PRINT(TXL_DEBUG, "backward suffixes name: %s(%s), %d, type %d, class %d ", shname, name, is_fakedn(name), htons(type), htons(dnscls));
+		LOG_DEBUG("backward suffixes name: %s(%s), %d, type %d, class %d ", shname, name, is_fakedn(name), htons(type), htons(dnscls));
 		// dst_buf = dns_copy_name(dst_buf, shname);
 		dst_buf = dns_copy_name(dst_buf, _is_client == 0 || is_fakedn(name)? shname: name);
 		dst_buf = dns_copy_value(dst_buf, &type, sizeof(type));
@@ -963,7 +963,7 @@ int get_suffixes_backward(char *dnsdst, size_t dstlen, const char *dnssrc, size_
 		dst_buf = dns_copy_value(dst_buf, &dnscls, sizeof(dnscls));
 		dst_buf = dns_copy_value(dst_buf, &dnsttl, sizeof(dnsttl));
 		dst_buf = dns_convert_value(&dns_pkt, htons(dnslen), trace_cname, type, dst_buf, name);
-		TX_PRINT(TXL_DEBUG, "rr %s %s %s", dns_type(htons(type)), name, __rr_desc);
+		LOG_DEBUG("rr %s %s %s", dns_type(htons(type)), name, __rr_desc);
 		dns_pkt.cursor = cursor_mark;
 
 		if (__rr_name[0] && trace_cname ) {
@@ -973,7 +973,7 @@ int get_suffixes_backward(char *dnsdst, size_t dstlen, const char *dnssrc, size_
 	}
 
 	if (dns_pkt.err) {
-		TX_PRINT(TXL_DEBUG, "handle error\n");
+		LOG_DEBUG("handle error\n");
 		return 0;
 	}
 
@@ -1043,12 +1043,12 @@ int self_query_hook(int outfd, const char *buf, size_t count, struct sockaddr_in
 	head.q_arcount = 0;
 	head.q_nscount = 0;
 	if (nstype == htons(NSTYPE_A) && (test == NULL || strcmp(test, "ip") == 0)) {
-		TX_PRINT(TXL_DEBUG, "fake IPv4 response, from %s", inet_ntoa(from->sin_addr));
+		LOG_DEBUG("fake IPv4 response, from %s", inet_ntoa(from->sin_addr));
 		dst = dns_addon_addA(dst, name, nsttl, htons(nscls), from->sin_addr.s_addr);
 		head.q_ancount++;
 	} else {
 		head.q_flags |= dns_rcode;
-		TX_PRINT(TXL_DEBUG, "fake response %s %s %s", name, dns_type(htons(nstype)), inet_ntoa(from->sin_addr));
+		LOG_DEBUG("fake response %s %s %s", name, dns_type(htons(nstype)), inet_ntoa(from->sin_addr));
 #if 0
 		dst = dns_answ_addCNAME(dst, name, nsttl, htons(nscls), test? test: "www.baidu.com");
 		head.q_ancount++;
@@ -1100,14 +1100,14 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 		int ident = htons(dnsp->q_ident);
 		client = &__cached_client[ident & 0x1FF];
 		if (client->r_ident != ident) {
-			TX_PRINT(TXL_DEBUG, "get unexpected response, just return");
+			LOG_DEBUG("get unexpected response, just return");
 			return 0;
 		}
 		len = (*dns_tr_response)(bufout, sizeof(bufout), buf, count);
 		dnsoutp->q_ident = htons(client->l_ident);
 
 		len > 0 && (err = sendto(up->sockfd, bufout, len, 0, &client->from.sa, sizeof(client->from)));
-		TX_PRINT(TXL_DEBUG, "sendto client %d/%d, %x %d", err, errno, client->flags, ident);
+		LOG_DEBUG("sendto client %d/%d, %x %d", err, errno, client->flags, ident);
 	} else if (!dns_query_hook(up->sockfd, buf, count, in_addr1)) {
 		int index = (__last_index++ & 0x1FF);
 		client = &__cached_client[index];
@@ -1123,7 +1123,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 		dns.in0.sin_port = up->forward.port;
 		dns.in0.sin_addr.s_addr = up->forward.address;
 		len > 0 && (err = sendto(up->outfd, bufout, len, 0, &dns.sa, sizeof(dns.sa)));
-		TX_PRINT(TXL_DEBUG, "sendto server %d/%d, %x %d, %s", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr));
+		LOG_DEBUG("sendto server %d/%d, %x %d, %s", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr));
 	}
 
 	return 0;
@@ -1143,7 +1143,7 @@ static void do_dns_udp_recv(void *upp)
 				(struct sockaddr *)&in_addr1, &in_len1);
 		tx_aincb_update(&up->file, count);
 		if (count < 12) {
-			// TX_PRINT(TXL_DEBUG, "recvfrom len %d, %d, strerr %s", count, errno, strerror(errno));
+			// LOG_DEBUG("recvfrom len %d, %d, strerr %s", count, errno, strerror(errno));
 			break;
 		}
 
@@ -1156,7 +1156,7 @@ static void do_dns_udp_recv(void *upp)
 				(struct sockaddr *)&in_addr1, &in_len1);
 		tx_aincb_update(&up->outgoing, count);
 		if (count < 12) {
-			// TX_PRINT(TXL_DEBUG, "recvfrom len %d, %d, strerr %s", count, errno, strerror(errno));
+			// LOG_DEBUG("recvfrom len %d, %d, strerr %s", count, errno, strerror(errno));
 			break;
 		}
 
@@ -1238,13 +1238,13 @@ void suffixes_config(int isclient, const char *suffixes)
 	}
 
 	if (isclient) {
-		TX_PRINT(TXL_DEBUG, "client mode");
+		LOG_DEBUG("client mode");
 		dns_tr_request = get_suffixes_backward;
 		dns_tr_response = get_suffixes_forward;
 		dns_query_hook  = none_query_hook;
 		_is_client = 1;
 	} else {
-		TX_PRINT(TXL_DEBUG, "server mode");
+		LOG_DEBUG("server mode");
 		dns_tr_request = get_suffixes_forward;
 		dns_tr_response = get_suffixes_backward;
 		dns_query_hook  = self_query_hook;

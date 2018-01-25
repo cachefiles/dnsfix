@@ -22,7 +22,7 @@ LOCAL_LDLIBS += -lws2_32
 endif
 
 ifeq ($(BUILD_TARGET), Linux)
-LOCAL_LDLIBS += -lrt
+LOCAL_LDLIBS += -lrt -lresolv
 endif
 
 LOCAL_CFLAGS += -g -Wall -Wno-sign-compare -I.
@@ -38,7 +38,7 @@ CXXFLAGS := $(LOCAL_CXXFLAGS)
 
 LDLIBS := $(LOCAL_LDLIBS)
 LDFLAGS := $(LOCAL_LDFLAGS)
-OBJECTS := ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o
+OBJECTS := ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o dnsproto.o
 
 dnsfix.exe: dnsfix
 	cp $< $@

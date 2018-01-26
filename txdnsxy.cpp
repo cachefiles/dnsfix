@@ -391,7 +391,7 @@ int get_suffixes_forward(struct dns_parser *parser)
 			return 0;
 		}
 
-		if (0x100 != (parser->head.flags & 0x8100) && is_fakedn(name)) {
+		if (0x100 != (parser->head.flags & 0x8100)) {
 			parser->head.flags |= 0x100;
 		}
 

@@ -504,7 +504,7 @@ int get_suffixes_backward(struct dns_parser *parser)
 		encrypt_domain(crypt, name);
 		strcpy(text, name);
 
-		if (is_fakedn(name)) {
+		if ((0x8000 & parser->head.flags) || is_fakedn(name)) {
 			que->flags |= DN_EXPANDED;
 			que->domain = (uint8_t*)dotp;
 		}

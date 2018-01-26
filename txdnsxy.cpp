@@ -117,6 +117,20 @@ char * decrypt_domain(char *name)
 	return NULL;
 }
 
+static int config_ip_rule(const uint8_t t[])
+{
+	char target[128];
+	const char *IP_RULE = getenv("IP_RULE_CMD");
+
+	if (IP_RULE != NULL) {
+		snprintf(target, sizeof(target), "%d.%d.%d.%d", t[0] & 0xff, t[1] & 0xff, t[2] & 0xff, t[3] & 0xff);
+		setenv("IP", target, 1);
+		system(IP_RULE);
+	} 
+
+	return 0;
+}
+
 static struct cached_client {
 	int flags;
 	unsigned short r_ident;
@@ -396,6 +410,11 @@ int get_suffixes_forward(struct dns_parser *parser)
 			res->domain = parser->question[0].domain;
 			res->flags |= DN_EXPANDED;
 		}
+
+		if (res->type == NSTYPE_A &&
+				strstr(name, SUFFIXES) != NULL) {
+			config_ip_rule(res->value);
+		}
 	}
 
 	return -1;
@@ -485,8 +504,11 @@ int get_suffixes_backward(struct dns_parser *parser)
 		encrypt_domain(crypt, name);
 		strcpy(text, name);
 
-		que->flags |= DN_EXPANDED;
-		que->domain = (uint8_t*)dotp;
+		if (is_fakedn(name)) {
+			que->flags |= DN_EXPANDED;
+			que->domain = (uint8_t*)dotp;
+		}
+
 		if (que->type == NSTYPE_CNAME) {
 			ask_cname = 1;
 		}

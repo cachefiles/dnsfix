@@ -21,7 +21,7 @@
 #define NSSIG_AAAA  "uuuu"
 #define NSSIG_OPT   "B"
 
-#define MAX_RECORD_COUNT 16
+#define MAX_RECORD_COUNT 32
 #define DN_EXPANDED 0x8000
 
 struct dns_header {

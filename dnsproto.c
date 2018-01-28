@@ -9,6 +9,10 @@
 
 #include "dnsproto.h"
 
+#ifdef __ANDROID__ 
+#define dn_comp __dn_comp  
+#endif
+
 struct dns_rsc_fixed {
 	uint16_t type;
 	uint16_t klass;

@@ -13,6 +13,13 @@
 #define dn_comp __dn_comp  
 #endif
 
+union dns_res_value {
+	uint32_t u32;
+	uint16_t u16;
+	char *str;
+	void *ptr;
+};
+
 struct dns_rsc_fixed {
 	uint16_t type;
 	uint16_t klass;
@@ -33,20 +40,6 @@ static int get_rsc_fixed(struct dns_resource *res, struct dns_rsc_fixed *pf, con
 	return 0;
 }
 
-static const uint8_t * dn_skip(const uint8_t *dn, const uint8_t *limit)
-{
-	uint8_t pfx;
-
-	while (dn < limit) {
-		pfx = *dn++;
-		if (pfx == 0) break;
-		if (pfx & 0xc0) { dn++;  break; }
-		dn += pfx;
-	}
-
-	return dn;
-}
-
 static const char * rsrc_verify_signature[256] = {
 	[NSTYPE_A] = NSSIG_A,
 	[NSTYPE_NS] = NSSIG_NS,
@@ -59,48 +52,101 @@ static const char * rsrc_verify_signature[256] = {
 	[NSTYPE_OPT] = NSSIG_OPT,
 };
 
-const uint8_t * rsc_verify_handle(struct dns_resource *res, const uint8_t *buf, const uint8_t *frame, const uint8_t *limit)
+#define ARRAY_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
+
+const char *add_domain(struct dns_parser *parser, const char *dn)
+{
+	int i;
+	int l;
+	int n = parser->strcnt;
+
+	for (i = 0; i < parser->strcnt; i++) {
+		if (strcmp(parser->strptr[i], dn) == 0) {
+			return parser->strptr[i];
+		}
+	}
+
+	if (parser->strcnt >= ARRAY_SIZE(parser->strptr)) {
+		fprintf(stderr, "str index is full\n");
+		return NULL;
+	}
+
+	if (parser->lastptr == NULL) {
+		assert (parser->strcnt == 0);
+		parser->lastptr = parser->strtab;
+	}
+
+	l = strlen(dn);
+	if (parser->lastptr + l 
+			>= parser->strtab + sizeof(parser->strtab)) {
+		fprintf(stderr, "str buf is full\n");
+		return NULL;
+	}
+
+	parser->strcnt++;
+	memcpy(parser->lastptr, dn, l + 1);
+	parser->strptr[n] = parser->lastptr;
+	parser->lastptr += (l + 1);
+	return parser->strptr[n];
+}
+
+const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *parse, const uint8_t *buf, const uint8_t *frame, size_t msglen)
 {
 	int len;
 	char dn[256];
+	const char *dnp = NULL;
 	const uint8_t *dopt = buf;
 
 	if (res->type < 256 && rsrc_verify_signature[res->type]) {
+		uint8_t *valptr = res->value;
+		uint8_t *vallimit = res->value + sizeof(res->value);
 		const char *signature = rsrc_verify_signature[res->type];
 
 		while (*signature) {
+			void *btr = valptr;
 			switch (*signature++) {
 				case 'B':
+					valptr += sizeof(dopt);
+					assert(valptr < vallimit);
+					memcpy(btr, &dopt, sizeof(dopt));
 					dopt += res->len;
 					break;
 
 				case 'u':
+					valptr += 4;
+					assert(valptr < vallimit);
+					*(uint32_t *)btr = ntohl(*(uint32_t *)dopt);
 					dopt += 4;
 					break;
 
 				case 'q':
+					valptr += 2;
+					assert(valptr < vallimit);
+					*(uint16_t *)btr = ntohs(*(uint16_t *)dopt);
 					dopt += 2;
 					break;
 
 				case 's':
-					len = dn_expand(frame, limit, dopt, dn, sizeof(dn));
-					if (len > 0) {
+					valptr += sizeof(char *);
+					assert(valptr < vallimit);
+					len = dn_expand(frame, &frame[len], dopt, dn, sizeof(dn));
+					if (len > 0 && (dnp = add_domain(parse, dn))) {
+						memcpy(btr, &dnp, sizeof(dnp));
 						dopt += len;
 						break;
 					}
 
 				default:
-					return limit;
+					return &frame[msglen];
 			}
 		}
 
 		if (dopt == buf + res->len) {
 			return buf;
 		}
-
 	}
 
-	return limit;
+	return &frame[msglen];
 }
 
 #define GET_SHORT(v, p) v = ntohs(*(uint16_t *)p)
@@ -108,7 +154,11 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, const uint8_t *buf, 
 struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, size_t len)
 {
 	const struct dns_header *phead = (const struct dns_header *)frame;
+	const uint8_t *limit = NULL;
 	const uint8_t *dotp = NULL;
+
+	char dn[256];
+	int complen = 0;
 	int num = 0;
 
 	int16_t nstype, nsclass;
@@ -116,9 +166,6 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 	struct dns_question *nsq;
 	struct dns_resource *res;
 	memset(parser, 0, sizeof(*parser));
-
-	parser->strtab = frame;
-	parser->limit  = &frame[len];
 
 	parser->head.ident = phead->ident;
 	parser->head.flags = ntohs(phead->flags);
@@ -128,64 +175,102 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 	parser->head.addon    = ntohs(phead->addon);
 
 	dotp = (const uint8_t *)(phead + 1);
-	fprintf(stderr, "header %d/%d/%d/%d\n",
-			parser->head.question, parser->head.answer,
-			parser->head.author, parser->head.addon);
+	limit = (const uint8_t *)(frame + len);
 
-	assert(parser->head.question < MAX_RECORD_COUNT);
-	for (num = 0; dotp < parser->limit && num < parser->head.question; num ++)  {
+	if (parser->head.question >= MAX_RECORD_COUNT ||
+			parser->head.answer >= MAX_RECORD_COUNT ||
+			parser->head.author >= MAX_RECORD_COUNT ||
+			parser->head.addon >= MAX_RECORD_COUNT) {
+		fprintf(stderr, "H: %d/%d/%d/%d\n",
+				parser->head.question, parser->head.answer,
+				parser->head.author, parser->head.addon); 
+		return NULL;
+	}
+		
+	for (num = 0; dotp < limit && num < parser->head.question; num ++)  {
 		nsq = &parser->question[num];
-		nsq->domain = dotp;
-		dotp = dn_skip(dotp, parser->limit);
+		complen = dn_expand(frame, limit, dotp, dn, sizeof(dn));
+		if (complen <= 0) {
+			return NULL;
+		}
+
+		dotp += complen;
+		nsq->domain = add_domain(parser, dn);
+		if (nsq->domain == NULL) {
+			return NULL;
+		}
+
 		GET_SHORT(nsq->type, dotp);
 		dotp += sizeof(nstype);
+
 		GET_SHORT(nsq->klass, dotp);
 		dotp += sizeof(nsclass);
 	}
 
-	assert(parser->head.answer < MAX_RECORD_COUNT);
-	for (num = 0; dotp < parser->limit && num < parser->head.answer; num ++)  {
+	for (num = 0; dotp < limit && num < parser->head.answer; num ++)  {
 		res = &parser->answer[num];
-		res->domain = dotp;
-		dotp = dn_skip(dotp, parser->limit);
+
+		complen = dn_expand(frame, limit, dotp, dn, sizeof(dn));
+		if (complen <= 0) {
+			return NULL;
+		}
+
+		dotp += complen;
+		res->domain = add_domain(parser, dn);
+		if (res->domain == NULL) {
+			return NULL;
+		}
 
 		get_rsc_fixed(res, &f0, dotp, sizeof(f0));
 		dotp += sizeof(f0);
 
-		res->value = dotp;
-		dotp = rsc_verify_handle(res, dotp, frame, parser->limit);
+		dotp = rsc_verify_handle(res, parser, dotp, frame, len);
 		dotp += f0.len;
 	}
 
-	assert(parser->head.author < MAX_RECORD_COUNT);
-	for (num = 0; dotp < parser->limit && num < parser->head.author; num ++)  {
+	for (num = 0; dotp < limit && num < parser->head.author; num ++)  {
 		res = &parser->author[num];
-		res->domain = dotp;
-		dotp = dn_skip(dotp, parser->limit);
+
+		complen = dn_expand(frame, limit, dotp, dn, sizeof(dn));
+		if (complen <= 0) {
+			return NULL;
+		}
+
+		dotp += complen;
+		res->domain = add_domain(parser, dn);
+		if (res->domain == NULL) {
+			return NULL;
+		}
 
 		get_rsc_fixed(res, &f0, dotp, sizeof(f0));
 		dotp += sizeof(f0);
 
-		res->value = dotp;
-		dotp = rsc_verify_handle(res, dotp, frame, parser->limit);
+		dotp = rsc_verify_handle(res, parser, dotp, frame, len);
 		dotp += f0.len;
 	}
 
-	assert(parser->head.addon < MAX_RECORD_COUNT);
-	for (num = 0; dotp < parser->limit && num < parser->head.addon; num ++)  {
+	for (num = 0; dotp < limit && num < parser->head.addon; num ++)  {
 		res = &parser->addon[num];
-		res->domain = dotp;
-		dotp = dn_skip(dotp, parser->limit);
+
+		complen = dn_expand(frame, limit, dotp, dn, sizeof(dn));
+		if (complen <= 0) {
+			return NULL;
+		}
+
+		dotp += complen;
+		res->domain = add_domain(parser, dn);
+		if (res->domain == NULL) {
+			return NULL;
+		}
 
 		get_rsc_fixed(res, &f0, dotp, sizeof(f0));
 		dotp += sizeof(f0);
 
-		res->value = dotp;
-		dotp = rsc_verify_handle(res, dotp, frame, parser->limit);
+		dotp = rsc_verify_handle(res, parser, dotp, frame, len);
 		dotp += f0.len;
 	}
 
-	if (dotp > parser->limit) {
+	if (dotp > limit) {
 		return NULL;
 	}
 
@@ -231,23 +316,13 @@ uint8_t * dn_put_long(uint8_t *buf, uint8_t *limit, uint32_t val)
 uint8_t * dn_put_resource(uint8_t *dotp, uint8_t *limit, const struct dns_resource *res, struct dns_parser *parse)
 {
 	int ret;
-	int skip;
-	char dn[256];
-	const char *dnp;
 	uint8_t *mark = NULL;
 
 	if (res->type < 256 && rsrc_verify_signature[res->type]) {
 		const uint8_t *right_val = res->value;
 		const char *signature = rsrc_verify_signature[res->type];
 
-		dnp = dn;
-		if (res->flags & DN_EXPANDED) {
-			dnp = (const char *)res->domain;
-		} else {
-			dn_expand(parse->strtab, parse->limit, res->domain, dn, sizeof(dn));
-		}
-
-		ret = dn_comp(dnp, dotp, limit - dotp, parse->comptr, parse->comptr + MAX_RECORD_COUNT);
+		ret = dn_comp(res->domain, dotp, limit - dotp, parse->comptr, parse->comptr + MAX_RECORD_COUNT);
 		if (ret <= 0 || dotp + ret >= limit) {
 			return limit;
 		}
@@ -261,35 +336,30 @@ uint8_t * dn_put_resource(uint8_t *dotp, uint8_t *limit, const struct dns_resour
 		dotp = dn_put_short(dotp, limit, res->len);
 
 		while (*signature) {
+			union dns_res_value * drvp = (union dns_res_value *)right_val;
 			switch (*signature++) {
 				case 'B':
-					memcpy(dotp, right_val, res->len);
-					right_val += res->len;
+					memcpy(dotp, drvp->ptr, res->len);
+					right_val += sizeof(void *);
 					dotp += res->len;
 					break;
 
 				case 'u':
-					memcpy(dotp, right_val, 4);
+					*(uint32_t *)dotp = htonl(drvp->u32);
 					right_val += 4;
 					dotp += 4;
 					break;
 
 				case 'q':
-					memcpy(dotp, right_val, 2);
+					*(uint16_t *)dotp = htonl(drvp->u16);
 					right_val += 2;
 					dotp += 2;
 					break;
 
 				case 's':
-					if (right_val < parse->limit && right_val >= parse->strtab) {
-						skip = dn_expand(parse->strtab, parse->limit, right_val, dn, sizeof(dn));
-					} else {
-						skip = dn_expand(res->value, res->value + res->len, right_val, dn, sizeof(dn));
-					}
-
-					ret = dn_comp(dn, dotp, limit - dotp, parse->comptr, parse->comptr + MAX_RECORD_COUNT);
-					if (ret > 0 && skip > 0) {
-						right_val += skip;
+					ret = dn_comp(drvp->str, dotp, limit - dotp, parse->comptr, parse->comptr + MAX_RECORD_COUNT);
+					if (ret > 0) {
+						right_val += sizeof(void *);
 						dotp += ret;
 						break;
 					}
@@ -319,8 +389,6 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 	struct dns_question *nsq;
 
 	uint8_t *limit  = &frame[len];
-	char dn[256];
-	const char *dnp = 0;
 
 	phead->ident = parser->head.ident;
 	phead->flags = htons(parser->head.flags);
@@ -336,15 +404,7 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 	assert(parser->head.question < MAX_RECORD_COUNT);
 	for (num = 0; dotp < limit && num < parser->head.question; num ++)  {
 		nsq = &parser->question[num];
-
-		dnp = dn;
-		if (nsq->flags & DN_EXPANDED) {
-			dnp = (const char *)nsq->domain;
-		} else {
-			dn_expand(parser->strtab, parser->limit, nsq->domain, dn, sizeof(dn));
-		}
-
-		dotp = dn_put_domain(dotp, limit, dnp, parser->comptr, MAX_RECORD_COUNT);
+		dotp = dn_put_domain(dotp, limit, nsq->domain, parser->comptr, MAX_RECORD_COUNT);
 		dotp = dn_put_short(dotp, limit, nsq->type);
 		dotp = dn_put_short(dotp, limit, nsq->klass);
 	}
@@ -372,4 +432,5 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 	}
 
 	return dotp - frame;
+
 }

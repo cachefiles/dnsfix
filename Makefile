@@ -19,6 +19,8 @@ endif
 ifeq ($(BUILD_TARGET), mingw)
 LOCAL_LDFLAGS += -static
 LOCAL_LDLIBS += -lws2_32
+else
+LOCAL_LDLIBS += -lresolv
 endif
 
 ifeq ($(BUILD_TARGET), Linux)

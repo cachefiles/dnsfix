@@ -22,7 +22,7 @@
 #define NSSIG_OPT   "B"
 
 #define MAX_RECORD_COUNT 32
-#define DN_EXPANDED 0x8000
+// #define DN_EXPANDED 0x8000
 
 struct dns_header {
 	uint16_t ident;
@@ -38,7 +38,7 @@ struct dns_question {
 	uint16_t klass;
 
 	int flags;
-	const uint8_t *domain;
+	const char *domain;
 };
 
 struct dns_resource {
@@ -48,13 +48,15 @@ struct dns_resource {
 	uint16_t len;
 
 	int flags;
-	const uint8_t *domain;
-	const uint8_t *value;
+	const char *domain;
+	uint8_t value[64];
 };
 
 struct dns_parser {
-	const uint8_t *strtab;
-	const uint8_t *limit;
+	int strcnt;
+	char strtab[2048];
+	char *lastptr;
+	const char *strptr[100];
 	uint8_t *comptr[MAX_RECORD_COUNT];
 
 	struct dns_header head;
@@ -69,6 +71,7 @@ extern "C" {
 #endif
 
 int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len);
+const char *add_domain(struct dns_parser *parser, const char *dn);
 struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, size_t len);
 
 #ifdef __cplusplus 

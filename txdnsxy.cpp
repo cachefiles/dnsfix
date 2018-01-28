@@ -367,7 +367,6 @@ const char *dns_type(int type)
 
 int get_suffixes_forward(struct dns_parser *parser)
 {
-	int ret;
 	char name[256], text[256];
 	static char nambuf[4096];
 	struct dns_question *que;
@@ -378,14 +377,9 @@ int get_suffixes_forward(struct dns_parser *parser)
 
 	for (int i = 0; i < parser->head.question && dotp < dotp_limit; i++) {
 		que = &parser->question[i];
-		if (que->flags & DN_EXPANDED) {
-			strcpy(name, (const char *)que->domain);
-		} else {
-			ret = dn_expand(parser->strtab, parser->limit, que->domain, name, sizeof(name));
-			assert(ret > 0);
-		}
 
-		strcpy(text, name);
+		strcpy(name, que->domain);
+		strcpy(text, que->domain);
 		if (!decrypt_domain(name) && 0) {
 			LOG_DEBUG("not allow %s %s", name, dns_type(parser->question[i].type));
 			return 0;
@@ -395,20 +389,19 @@ int get_suffixes_forward(struct dns_parser *parser)
 			parser->head.flags |= 0x100;
 		}
 
-		que->flags |= DN_EXPANDED;
-		que->domain = (uint8_t*)dotp;
+		que->domain = add_domain(parser, name);
+		if (que->domain == NULL) {
+			return 0;
+		}
 
-		dotp += snprintf(dotp, dotp_limit - dotp, "%s", name);
-		dotp ++;
 		LOG_DEBUG("crypt name %s from %s", name, text);
 	}
 
 	for (int i = 0; i < parser->head.answer; i++) {
 		res = &parser->answer[i];
-		ret = dn_expand(parser->strtab, parser->limit, res->domain, name, sizeof(name));
-		if (strcasecmp(text, name) == 0) {
+
+		if (strcasecmp(text, res->domain) == 0) {
 			res->domain = parser->question[0].domain;
-			res->flags |= DN_EXPANDED;
 		}
 
 		if (res->type == NSTYPE_A &&
@@ -479,62 +472,52 @@ dst_buf = dns_addon_addA(dst_buf, "m.root-servers.net", nsttl, htons(dnscls), in
 dns_dstp->q_arcount = htons(13);
 #endif
 
+struct dns_cname {
+	const char *alias;
+};
+
 int get_suffixes_backward(struct dns_parser *parser)
 {
-	char name[256], crypt[256], text[256];
-	static char nambuf[4096];
+	char crypt[256], text[256];
+	const char *namptr = NULL;
 	struct dns_question *que;
 	struct dns_resource *res;
-	int namlen = 0;
-	const uint8_t *namptr = NULL;
-
-	char *dotp = nambuf;
-
-	LOG_DEBUG("get_suffixes_backward nsflag %x", 0);
 
 	int trace_cname = 0, have_cname = 0, non_cname = 0, ask_cname = 0;
-	char *dotp_limit = nambuf + sizeof(nambuf);
+	LOG_DEBUG("get_suffixes_backward nsflag %x", 0);
 
-	for (int i = 0; i < parser->head.question && dotp < dotp_limit; i++) {
+	for (int i = 0; i < parser->head.question; i++) {
 		que = &parser->question[i];
-		if (que->flags & DN_EXPANDED) {
-			strcpy(name, (const char *)que->domain);
-		} else {
-			namlen = dn_expand(parser->strtab, parser->limit, que->domain, name, sizeof(name));
-			namptr = que->domain;
+		strcpy(text, que->domain);
+		encrypt_domain(crypt, que->domain);
+
+		namptr = que->domain;
+		if ((0x8000 & parser->head.flags) || is_fakedn(que->domain)) {
+			que->domain = add_domain(parser, crypt);
 		}
 
-		encrypt_domain(crypt, name);
-		strcpy(text, name);
-
-		if ((0x8000 & parser->head.flags) || is_fakedn(name)) {
-			que->flags |= DN_EXPANDED;
-			que->domain = (uint8_t*)dotp;
+		if (que->domain == NULL) {
+			return 0;
 		}
 
 		if (que->type == NSTYPE_CNAME) {
 			ask_cname = 1;
 		}
-
-		dotp += snprintf(dotp, dotp_limit - dotp, "%s", crypt);
-		dotp ++;
 	}
 
 	if ((0x8000 & parser->head.flags) && is_fakedn(text)) {
 		trace_cname = 1;
 	}
 
-	for (int i = 0; i < parser->head.answer && dotp < dotp_limit; i++) {
+	for (int i = 0; i < parser->head.answer; i++) {
 		res = &parser->answer[i];
 
-		dn_expand(parser->strtab, parser->limit, res->domain, name, sizeof(name));
-		if (strcasecmp(name, text) == 0) {
-			res->flags |= DN_EXPANDED;
-			res->domain = (uint8_t *)dotp;
+		if (strcasecmp(res->domain, text) == 0) {
+			res->domain = parser->question[0].domain;
+		}
 
-			encrypt_domain(crypt, name);
-			dotp += snprintf(dotp, dotp_limit - dotp, "%s", crypt);
-			dotp ++;
+		if (res->domain == NULL) {
+			return 0;
 		}
 
 		if (res->type == NSTYPE_CNAME) {
@@ -547,27 +530,25 @@ int get_suffixes_backward(struct dns_parser *parser)
 	int total = 0;
 	LOG_DEBUG("%d %s %d trace %d have %d non %d ask %d\n", parser->head.answer, text, is_fakedn(text), trace_cname, have_cname, non_cname, ask_cname);
 	if (trace_cname && have_cname && non_cname && !ask_cname) {
-		for (int i = 0; i < parser->head.answer && dotp < dotp_limit; i++) {
+		for (int i = 0; i < parser->head.answer; i++) {
 			res = &parser->answer[i];
 			if (res->type == NSTYPE_CNAME) continue;
-			if (i > total) {
-				res->domain = parser->question[0].domain;
-				res->flags |= DN_EXPANDED;
+			res->domain = parser->question[0].domain;
+			if (i > total)
 				parser->answer[total] = *res;
-			}
 			total++;
 		}
 		parser->head.answer = total;
 	} else if ((parser->head.answer == 0)
-			&& (namptr != NULL && namlen > 0)
 			&& (0x8000 & parser->head.flags)) {
 		parser->answer[0].domain = parser->question[0].domain;
-		parser->answer[0].flags |= DN_EXPANDED;
-		parser->answer[0].value  = namptr;
 		parser->answer[0].klass  = parser->question[0].klass;
 		parser->answer[0].type   = NSTYPE_CNAME;
 		parser->answer[0].ttl    = 36000;
-		parser->answer[0].len    = namlen;
+		parser->answer[0].len    = 100; // invalid value;
+
+		struct dns_cname *cptr = (struct dns_cname *)parser->answer[0].value;
+		cptr->alias = namptr;
 		parser->head.answer++;
 	}
 
@@ -577,14 +558,15 @@ int get_suffixes_backward(struct dns_parser *parser)
 int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 {
 	int dns_rcode = 0;
-	char name[256], shname[256], *test, *last;
+	char shname[256], *test, *last;
 
 	u_char tmp[1500];
+	struct dns_question *que;
 
 	for (int i = 0; i < parser->head.question; i++) {
-		dn_expand(parser->strtab, parser->limit, parser->question[i].domain, name, sizeof(name));
+		que = &parser->question[i];
 
-		strcpy(shname, name);
+		strcpy(shname, que->domain);
 		test = decrypt_domain(shname);
 		if (!test && strcmp(shname, SUFFIXES + 1) != 0) return 1;
 
@@ -620,34 +602,40 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 		parser->answer[0].type = parser->question[0].type;
 		parser->answer[0].ttl  = 3600;
 		parser->answer[0].len  = 4;
-		parser->answer[0].value  = (uint8_t *)&from->sin_addr;
+
+		u_long in_addr = htonl(from->sin_addr.s_addr);
+		memcpy(parser->answer[0].value, &in_addr, sizeof(in_addr));
 		parser->head.answer = 1;
 	} else {
 		parser->head.flags  |= dns_rcode;
 	}
 
+	struct dns_soa {
+		const char *name_server;
+		const char *admin_email;
+		uint32_t serial;
+		uint32_t day2;
+		uint32_t day3;
+		uint32_t day4;
+		uint32_t day5;
+	};
+
 	if (dns_rcode == RCODE_NXDOMAIN) {
-		int len = 0;
-		static uint8_t soa_txt[256];
-		int *p, ttls[5] = {0xdeffbeef, 1800, 1800, 36000, 3600};
+		struct dns_soa *psoa = (struct dns_soa *)parser->author[0].value;
 
-		len = dn_comp("p.yrli.bid", soa_txt, sizeof(soa_txt), NULL, NULL);
-		len += dn_comp("pagx.163.com", soa_txt + len, sizeof(soa_txt) - len, NULL, NULL);
-		p = (int *)(soa_txt + len);
-		*p++ = htonl(ttls[0]);
-		*p++ = htonl(ttls[1]);
-		*p++ = htonl(ttls[2]);
-		*p++ = htonl(ttls[3]);
-		*p++ = htonl(ttls[4]);
-		len += sizeof(ttls);
+		psoa->name_server = "p.yrli.bid";
+		psoa->admin_email = "pagx.163.com";
+		psoa->serial = 18000;
+		psoa->day2 = 18000;
+		psoa->day3 = 18000;
+		psoa->day4 = 18000;
+		psoa->day5 = 18000;
 
-		parser->author[0].domain = (const uint8_t *)"domain.p.yrli.bid";
-		parser->author[0].flags |= DN_EXPANDED;
+		parser->author[0].domain = "domain.p.yrli.bid";
 		parser->author[0].klass = parser->question[0].klass;
 		parser->author[0].type = NSTYPE_SOA;
 		parser->author[0].ttl  = 3600;
-		parser->author[0].len  = len;
-		parser->author[0].value  = soa_txt;
+		parser->author[0].len  = 100;
 		parser->head.author = 1;
 	}
 

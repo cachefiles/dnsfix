@@ -77,7 +77,7 @@ const char *add_domain(struct dns_parser *parser, const char *dn)
 	}
 
 	l = strlen(dn);
-	if (parser->lastptr + l 
+	if (parser->lastptr + l + 1
 			>= parser->strtab + sizeof(parser->strtab)) {
 		fprintf(stderr, "str buf is full\n");
 		return NULL;
@@ -129,7 +129,7 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 				case 's':
 					valptr += sizeof(char *);
 					assert(valptr < vallimit);
-					len = dn_expand(frame, &frame[len], dopt, dn, sizeof(dn));
+					len = dn_expand(frame, &frame[msglen], dopt, dn, sizeof(dn));
 					if (len > 0 && (dnp = add_domain(parse, dn))) {
 						memcpy(btr, &dnp, sizeof(dnp));
 						dopt += len;

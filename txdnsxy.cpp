@@ -385,7 +385,7 @@ int get_suffixes_forward(struct dns_parser *parser)
 			return 0;
 		}
 
-		if (0x100 != (parser->head.flags & 0x8100)) {
+		if (0x0000 == (parser->head.flags & 0x8100)) {
 			parser->head.flags |= 0x100;
 		}
 
@@ -558,6 +558,7 @@ int get_suffixes_backward(struct dns_parser *parser)
 int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 {
 	int dns_rcode = 0;
+	int flags = (parser->head.flags & 0x8100);
 	char shname[256], *test, *last;
 
 	u_char tmp[1500];
@@ -571,11 +572,13 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 		if (!test && strcmp(shname, SUFFIXES + 1) != 0) return 1;
 
 		if (test != NULL) {
+			LOG_DEBUG("test is %s, flags %x", test, flags);
 			last = strrchr(shname, '.');
 			dns_rcode = RCODE_NXDOMAIN;
 			if (last == NULL) {
 				dns_rcode = RCODE_NXDOMAIN;
-			} else if (isalpha(last[1])) {
+			} else if (isalpha(last[1])
+					&& (0x0100 == flags || is_fakedn(shname))) {
 				return 0;
 			}
 		}
@@ -593,7 +596,6 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 	parser->head.author = 0;
 	parser->head.addon = 0;
 
-	fprintf(stderr, "Hello: %s\n", test);
 	if (parser->question[0].type == NSTYPE_A &&
 			(test == NULL || strcmp(test, "ip") == 0 || strcmp(test, "vc") == 0)) {
 		LOG_DEBUG("fake IPv4 response, from %s", inet_ntoa(from->sin_addr));
@@ -606,6 +608,16 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 		u_long in_addr = htonl(from->sin_addr.s_addr);
 		memcpy(parser->answer[0].value, &in_addr, sizeof(in_addr));
 		parser->head.answer = 1;
+	} else if (flags == 0x0000 && parser->head.answer == 0) {
+		parser->answer[0].domain = parser->question[0].domain;
+		parser->answer[0].klass = parser->question[0].klass;
+		parser->answer[0].type = NSTYPE_CNAME;
+		parser->answer[0].ttl  = 3600;
+		parser->answer[0].len  = 4;
+		parser->head.answer = 1;
+
+		struct dns_cname *cptr = (struct dns_cname *)parser->answer[0].value;
+		cptr->alias = add_domain(parser, shname);
 	} else {
 		parser->head.flags  |= dns_rcode;
 	}

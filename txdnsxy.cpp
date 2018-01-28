@@ -485,6 +485,8 @@ int get_suffixes_backward(struct dns_parser *parser)
 	static char nambuf[4096];
 	struct dns_question *que;
 	struct dns_resource *res;
+	int namlen = 0;
+	const uint8_t *namptr = NULL;
 
 	char *dotp = nambuf;
 
@@ -498,7 +500,8 @@ int get_suffixes_backward(struct dns_parser *parser)
 		if (que->flags & DN_EXPANDED) {
 			strcpy(name, (const char *)que->domain);
 		} else {
-			dn_expand(parser->strtab, parser->limit, que->domain, name, sizeof(name));
+			namlen = dn_expand(parser->strtab, parser->limit, que->domain, name, sizeof(name));
+			namptr = que->domain;
 		}
 
 		encrypt_domain(crypt, name);
@@ -555,6 +558,17 @@ int get_suffixes_backward(struct dns_parser *parser)
 			total++;
 		}
 		parser->head.answer = total;
+	} else if ((parser->head.answer == 0)
+			&& (namptr != NULL && namlen > 0)
+			&& (0x8000 & parser->head.flags)) {
+		parser->answer[0].domain = parser->question[0].domain;
+		parser->answer[0].flags |= DN_EXPANDED;
+		parser->answer[0].value  = namptr;
+		parser->answer[0].klass  = parser->question[0].klass;
+		parser->answer[0].type   = NSTYPE_CNAME;
+		parser->answer[0].ttl    = 36000;
+		parser->answer[0].len    = namlen;
+		parser->head.answer++;
 	}
 
 	return -1;

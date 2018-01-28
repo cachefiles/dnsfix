@@ -108,7 +108,7 @@ char * decrypt_domain(char *name)
 	}
 
 	ln = strlen(n);
-	if (lt < ln && strcmp(n + ln - lt, SUFFIXES) == 0) {
+	if (lt < ln && strcasecmp(n + ln - lt, SUFFIXES) == 0) {
 		n[ln - lt] = 0;
 		for (int l = 0; l < ln - lt; l++) n[l] = __map_code(n[l]);
 		return name;
@@ -406,13 +406,13 @@ int get_suffixes_forward(struct dns_parser *parser)
 	for (int i = 0; i < parser->head.answer; i++) {
 		res = &parser->answer[i];
 		ret = dn_expand(parser->strtab, parser->limit, res->domain, name, sizeof(name));
-		if (strcmp(text, name) == 0) {
+		if (strcasecmp(text, name) == 0) {
 			res->domain = parser->question[0].domain;
 			res->flags |= DN_EXPANDED;
 		}
 
 		if (res->type == NSTYPE_A &&
-				strstr(name, SUFFIXES) != NULL) {
+				strcasestr(name, SUFFIXES) != NULL) {
 			config_ip_rule(res->value);
 		}
 	}
@@ -525,7 +525,7 @@ int get_suffixes_backward(struct dns_parser *parser)
 		res = &parser->answer[i];
 
 		dn_expand(parser->strtab, parser->limit, res->domain, name, sizeof(name));
-		if (strcmp(name, text) == 0) {
+		if (strcasecmp(name, text) == 0) {
 			res->flags |= DN_EXPANDED;
 			res->domain = (uint8_t *)dotp;
 

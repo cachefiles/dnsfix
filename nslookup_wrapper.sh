@@ -17,7 +17,7 @@ encrypt_once() {
 		alphaA=$(printf '%d' "'A");
 	fi;
 
-	ascii=$(($alphaA + ( $alphaX - $alphaA + 26 - 7) % 26))
+	ascii=$(($alphaA + ( $alphaX - $alphaA + 26 - 13) % 26))
 	echo -e -n $(printf "\\\\x%x" $ascii)
 }
 
@@ -53,7 +53,7 @@ decrypt_once() {
 		alphaA=\$(printf '%d' "'A");
 	fi;
 
-	ascii=\$((\$alphaA + ( \$alphaX - \$alphaA + 7) % 26))
+	ascii=\$((\$alphaA + ( \$alphaX - \$alphaA + 13) % 26))
 	echo -e -n \$(printf "\\\\\\\\x%x" \$ascii)
 }
 
@@ -113,5 +113,7 @@ EOF
 }
 
 WRAPDOMAIN=$(encrypt_domain $1)
-nslookup $WRAPDOMAIN.p.yrli.bid|( sed "/Server/{N; p; d;}; s/Name:\(.*\)/Name: \$(decrypt_domain \1)/; s/Address:\(.*\)/Address: \$(decrypt_address \1)/; ")|(load_func; sed "s/^/echo /;/decrypt_domain/{h; s/.*decrypt_domain\(.*\))/check_domain \1/p; g;}")|bash
+shift
+echo $WRAPDOMAIN
+nslookup $WRAPDOMAIN.p.yrli.bid $@|( sed "/Server/{N; p; d;}; s/Name:\(.*\)/Name: \$(decrypt_domain \1)/; s/Address:\(.*\)/Address: \$(decrypt_address \1)/; ")|(load_func; sed "s/^/echo /;/decrypt_domain/{h; s/.*decrypt_domain\(.*\))/check_domain \1/p; g;}")|bash
 

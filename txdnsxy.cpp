@@ -120,10 +120,13 @@ char * decrypt_domain(char *name)
 static int config_ip_rule(const uint8_t t[])
 {
 	char target[128];
+	u_long dest;
 	const char *IP_RULE = getenv("IP_RULE_CMD");
 
 	if (IP_RULE != NULL) {
-		snprintf(target, sizeof(target), "%d.%d.%d.%d", t[0] & 0xff, t[1] & 0xff, t[2] & 0xff, t[3] & 0xff);
+		memcpy(&dest, t, sizeof(dest));
+		dest = htonl(dest);
+		inet_ntop(AF_INET, &dest, target, sizeof(target));
 		setenv("IP", target, 1);
 		system(IP_RULE);
 	} 
@@ -400,12 +403,14 @@ int get_suffixes_forward(struct dns_parser *parser)
 	for (int i = 0; i < parser->head.answer; i++) {
 		res = &parser->answer[i];
 
+		const char *orig_name = res->domain;
 		if (strcasecmp(text, res->domain) == 0) {
 			res->domain = parser->question[0].domain;
 		}
 
+		LOG_DEBUG("orig name: %s\n", orig_name);
 		if (res->type == NSTYPE_A &&
-				strcasestr(name, SUFFIXES) != NULL) {
+				strcasestr(orig_name, SUFFIXES) != NULL) {
 			config_ip_rule(res->value);
 		}
 	}

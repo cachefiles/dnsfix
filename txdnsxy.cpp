@@ -481,6 +481,8 @@ struct dns_cname {
 	const char *alias;
 };
 
+extern "C" void log_fake_route(uint8_t *ipv4);
+
 int get_suffixes_backward(struct dns_parser *parser)
 {
 	char crypt[256], text[256];
@@ -538,6 +540,7 @@ int get_suffixes_backward(struct dns_parser *parser)
 		for (int i = 0; i < parser->head.answer; i++) {
 			res = &parser->answer[i];
 			if (res->type == NSTYPE_CNAME) continue;
+			if (res->type == NSTYPE_A) log_fake_route(res->value);
 			res->domain = parser->question[0].domain;
 			if (i > total)
 				parser->answer[total] = *res;

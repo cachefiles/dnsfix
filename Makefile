@@ -40,7 +40,7 @@ CXXFLAGS := $(LOCAL_CXXFLAGS)
 
 LDLIBS := $(LOCAL_LDLIBS)
 LDFLAGS := $(LOCAL_LDFLAGS)
-OBJECTS := ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o dnsproto.o
+OBJECTS := ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o dnsproto.o router.o
 
 dnsfix.exe: dnsfix
 	cp $< $@

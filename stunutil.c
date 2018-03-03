@@ -483,6 +483,13 @@ int main(int argc, char *argv[])
 			}
 
 			mime.sin_port = htons(d_port);
+		} else if (0 == strncmp(argv[i], "-h", 2)) {
+			fprintf(stderr, "%s [options] <server-list>\n", argv[0]);
+			fprintf(stderr, "\t-p <port> source port\n");
+			fprintf(stderr, "\t-f <flags> port|all|ip|ip:port\n");
+			fprintf(stderr, "\tserver-list\n");
+			fprintf(stderr, "\n");
+			exit(0);
 		} else if (0 == strncmp(argv[i], "-f", 2)) {
 			const char *opt = argv[i] + 2;
 

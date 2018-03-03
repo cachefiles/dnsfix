@@ -17,8 +17,8 @@
 #define NSSIG_NS    "s"
 #define NSSIG_SRV   "qqqs"
 #define NSSIG_PTR   "s"
-#define NSSIG_A     "u"
-#define NSSIG_AAAA  "uuuu"
+#define NSSIG_A     "A"
+#define NSSIG_AAAA  "AAAA"
 #define NSSIG_OPT   "B"
 
 #define MAX_RECORD_COUNT 32

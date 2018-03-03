@@ -121,6 +121,13 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 					dopt += 4;
 					break;
 
+				case 'A':
+					valptr += 4;
+					assert(valptr < vallimit);
+					memcpy(btr, dopt, sizeof(uint32_t));
+					dopt += 4;
+					break;
+
 				case 'q':
 					valptr += 2;
 					assert(valptr < vallimit);
@@ -348,6 +355,12 @@ uint8_t * dn_put_resource(uint8_t *dotp, uint8_t *limit, const struct dns_resour
 
 				case 'u':
 					NTOH_PTR_SET(dotp, &drvp->u32, uint32_t);
+					right_val += 4;
+					dotp += 4;
+					break;
+
+				case 'A':
+					memcpy(dotp, &drvp->u32, sizeof(uint32_t));
 					right_val += 4;
 					dotp += 4;
 					break;

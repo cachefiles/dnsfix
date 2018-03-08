@@ -189,7 +189,7 @@ static const char *BLOCK_ROUTE = NULL;
 void log_fake_route(uint8_t *fakeip)
 {
 	struct in_addr ip;
-	u_long dest = 0;
+	u_long dest;
 
 	if (_log_fake_init == 0) {
 		BLOCK_ROUTE = getenv("BLOCK_ROUTE");
@@ -200,8 +200,8 @@ void log_fake_route(uint8_t *fakeip)
 		return;
 	}
 
-	memcpy(&dest, fakeip, sizeof(dest));
-	ip.s_addr = htonl(dest);
+	memcpy(&ip.s_addr, fakeip, sizeof(ip.s_addr));
+	dest = htonl(ip.s_addr);
 
 	if (route_get(ip) != NULL) {
 		return;

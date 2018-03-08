@@ -147,7 +147,7 @@ static struct cached_client {
 		struct sockaddr sa;
 		struct sockaddr_in in0;
 	} from;
-} __cached_client[512];
+} __cached_client[4096];
 
 static int __last_index = 0;
 
@@ -489,6 +489,7 @@ int get_suffixes_backward(struct dns_parser *parser)
 	const char *namptr = NULL;
 	struct dns_question *que;
 	struct dns_resource *res;
+	int namlen = 0;
 
 	int trace_cname = 0, have_cname = 0, non_cname = 0, ask_cname = 0;
 	LOG_DEBUG("get_suffixes_backward nsflag %x", 0);
@@ -563,12 +564,25 @@ int get_suffixes_backward(struct dns_parser *parser)
 	return -1;
 }
 
+static int is_myip_name(const char *test)
+{
+	int i = 0;
+	const char *_myip_list[] = {"ip", "vc", "my.ip", "zl.vc", NULL};
+	while (test != NULL && _myip_list[i] && strcmp(_myip_list[i], test)) i++;
+
+	return test == NULL || _myip_list[i] != NULL;
+}
+
+static const char GCM_DOMAIN[] = "mtalk.google.com";
+static const size_t GCM_LEN = sizeof(GCM_DOMAIN) -1;
+
 int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 {
 	int dns_rcode = 0;
 	int flags = (parser->head.flags & 0x8100);
 	char shname[256], *test, *last;
 
+	int gcm = 0;
 	u_char tmp[1500];
 	struct dns_question *que;
 
@@ -578,6 +592,13 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 		strcpy(shname, que->domain);
 		test = decrypt_domain(shname);
 		if (!test && strcmp(shname, SUFFIXES + 1) != 0) return 1;
+
+		size_t len = strlen(shname);
+		if (que->type == NSTYPE_A && len >= GCM_LEN
+				&& 0 == strcmp(&shname[len - GCM_LEN], GCM_DOMAIN)) {
+			gcm = 1;
+			break;
+		}
 
 		if (test != NULL) {
 			LOG_DEBUG("test is %s, flags %x", test, flags);
@@ -604,8 +625,21 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 	parser->head.author = 0;
 	parser->head.addon = 0;
 
-	if (parser->question[0].type == NSTYPE_A &&
-			(test == NULL || strcmp(test, "ip") == 0 || strcmp(test, "vc") == 0)) {
+	if (parser->question[0].type == NSTYPE_A && gcm == 1) {
+		parser->head.answer = 0;
+		parser->head.author = 0;
+		parser->head.addon = 0;
+
+		parser->answer[0].domain = parser->question[0].domain;
+		parser->answer[0].klass = parser->question[0].klass;
+		parser->answer[0].type = NSTYPE_CNAME;
+		parser->answer[0].ttl  = 3600;
+		parser->answer[0].len  = 4;
+
+		struct dns_cname *cptr = (struct dns_cname *)parser->answer[0].value;
+		cptr->alias = add_domain(parser, "mtalk.cachefiles.net");
+		parser->head.answer = 1;
+	} else if (parser->question[0].type == NSTYPE_A && is_myip_name(test)) {
 		LOG_DEBUG("fake IPv4 response, from %s", inet_ntoa(from->sin_addr));
 		parser->answer[0].domain = parser->question[0].domain;
 		parser->answer[0].klass = parser->question[0].klass;
@@ -667,7 +701,44 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 
 int none_query_hook(int outfd, struct dns_parser *parser, struct sockaddr_in *from)
 {
-	return 0;
+	size_t len;
+	u_char tmp[1500];
+	struct dns_question *que;
+
+	for (int i = 0; i < parser->head.question; i++) {
+		que = &parser->question[i];
+		len = strlen(que->domain);
+		if (que->type != NSTYPE_A || len < GCM_LEN
+				|| strcmp(&que->domain[len - GCM_LEN], GCM_DOMAIN)) {
+			return 0;
+		}
+	}
+
+	if (parser->head.question <= 0) {
+		return 1;
+	}
+
+	parser->head.flags  &= NSFLAG_RD;
+	parser->head.flags  |= (NSFLAG_QR| NSFLAG_AA);
+
+	parser->head.answer = 0;
+	parser->head.author = 0;
+	parser->head.addon = 0;
+
+	parser->answer[0].domain = parser->question[0].domain;
+	parser->answer[0].klass = parser->question[0].klass;
+	parser->answer[0].type = parser->question[0].type;
+	parser->answer[0].ttl  = 3600;
+	parser->answer[0].len  = 4;
+
+	u_long in_addr = inet_addr("1.1.1.1");
+	memcpy(parser->answer[0].value, &in_addr, sizeof(in_addr));
+	parser->head.answer = 1;
+
+	len = dns_build(parser, tmp, sizeof(tmp));
+	sendto(outfd, (char *)tmp, len, 0, (struct sockaddr *)from, sizeof(*from));
+
+	return 1;
 }
 
 static int (*dns_query_hook)(int fd, struct dns_parser *parser, struct sockaddr_in *) = self_query_hook;
@@ -691,7 +762,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 
 	if (parser.head.flags & 0x8000) {
 		int ident = parser.head.ident;
-		client = &__cached_client[ident & 0x1FF];
+		client = &__cached_client[ident & 0xFFF];
 		if (client->r_ident != ident) {
 			LOG_DEBUG("get unexpected response, just return");
 			return 0;
@@ -701,13 +772,13 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 
 		len = dns_build(&parser, (uint8_t *)bufout, sizeof(bufout));
 		len > 0 && (err = sendto(up->sockfd, bufout, len, 0, &client->from.sa, sizeof(client->from)));
-		LOG_DEBUG("sendto client %d/%d, %x %d", err, errno, client->flags, ident);
+		LOG_DEBUG("sendto client %d/%d, %x 0x%x", err, errno, client->flags, client->l_ident);
 	} else if (!dns_query_hook(up->sockfd, &parser, in_addr1)) {
-		int index = (__last_index++ & 0x1FF);
+		int index = (__last_index++ & 0xFFF);
 		client = &__cached_client[index];
 		memcpy(&client->from, in_addr1, namlen);
 		client->l_ident = (parser.head.ident);
-		client->r_ident = (rand() & 0xFE00) | index;
+		client->r_ident = (rand() & 0xF000) | index;
 		client->len_cached = 0;
 		len = (*dns_tr_request)(&parser);
 		parser.head.ident = (client->r_ident);
@@ -718,7 +789,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 		dns.in0.sin_port = up->forward.port;
 		dns.in0.sin_addr.s_addr = up->forward.address;
 		len > 0 && (err = sendto(up->outfd, bufout, len, 0, &dns.sa, sizeof(dns.sa)));
-		LOG_DEBUG("sendto server %d/%d, %x %d, %s", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr));
+		LOG_DEBUG("sendto server %d/%d, %x %d, %s 0x%x", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr), client->l_ident);
 	}
 
 	return 0;

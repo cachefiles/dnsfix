@@ -120,13 +120,10 @@ char * decrypt_domain(char *name)
 static int config_ip_rule(const uint8_t t[])
 {
 	char target[128];
-	u_long dest;
 	const char *IP_RULE = getenv("IP_RULE_CMD");
 
 	if (IP_RULE != NULL) {
-		memcpy(&dest, t, sizeof(dest));
-		dest = htonl(dest);
-		inet_ntop(AF_INET, &dest, target, sizeof(target));
+		inet_ntop(AF_INET, t, target, sizeof(target));
 		setenv("IP", target, 1);
 		system(IP_RULE);
 	} 
@@ -548,6 +545,7 @@ int get_suffixes_backward(struct dns_parser *parser)
 			total++;
 		}
 		parser->head.answer = total;
+
 	} else if ((parser->head.answer == 0)
 			&& (0x8000 & parser->head.flags)) {
 		parser->answer[0].domain = parser->question[0].domain;
@@ -593,12 +591,21 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 		test = decrypt_domain(shname);
 		if (!test && strcmp(shname, SUFFIXES + 1) != 0) return 1;
 
+#if ENABLE_GOGL_NAME_REMAP
 		size_t len = strlen(shname);
 		if (que->type == NSTYPE_A && len >= GCM_LEN
 				&& 0 == strcmp(&shname[len - GCM_LEN], GCM_DOMAIN)) {
 			gcm = 1;
 			break;
 		}
+
+#define GOGL_DOMAIN "www.google.com"
+		if (que->type == NSTYPE_A 
+				&& 0 == strcmp(shname, GOGL_DOMAIN)) {
+			gcm = 2;
+			break;
+		}
+#endif
 
 		if (test != NULL) {
 			LOG_DEBUG("test is %s, flags %x", test, flags);
@@ -625,7 +632,7 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 	parser->head.author = 0;
 	parser->head.addon = 0;
 
-	if (parser->question[0].type == NSTYPE_A && gcm == 1) {
+	if (parser->question[0].type == NSTYPE_A && gcm >= 1) {
 		parser->head.answer = 0;
 		parser->head.author = 0;
 		parser->head.addon = 0;
@@ -637,7 +644,7 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 		parser->answer[0].len  = 4;
 
 		struct dns_cname *cptr = (struct dns_cname *)parser->answer[0].value;
-		cptr->alias = add_domain(parser, "mtalk.cachefiles.net");
+		cptr->alias = add_domain(parser, gcm == 1? "mtalk.cachefiles.net": "www.g.cn");
 		parser->head.answer = 1;
 	} else if (parser->question[0].type == NSTYPE_A && is_myip_name(test)) {
 		LOG_DEBUG("fake IPv4 response, from %s", inet_ntoa(from->sin_addr));
@@ -712,6 +719,14 @@ int none_query_hook(int outfd, struct dns_parser *parser, struct sockaddr_in *fr
 				|| strcmp(&que->domain[len - GCM_LEN], GCM_DOMAIN)) {
 			return 0;
 		}
+#if ENABLE_GOGL_NAME_REMAP
+#define GOGL_DOMAIN "www.google.com"
+		if (que->type == NSTYPE_A 
+				&& 0 == strcmp(shname, GOGL_DOMAIN)) {
+			gcm = 2;
+			break;
+		}
+#endif
 	}
 
 	if (parser->head.question <= 0) {

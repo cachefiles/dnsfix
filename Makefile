@@ -40,7 +40,7 @@ CXXFLAGS := $(LOCAL_CXXFLAGS)
 
 LDLIBS := $(LOCAL_LDLIBS)
 LDFLAGS := $(LOCAL_LDFLAGS)
-OBJECTS := ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o dnsproto.o router.o
+OBJECTS := ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o dnsproto.o router.o subnet_data.o subnet_api.o
 
 dnsfix.exe: dnsfix
 	cp $< $@
@@ -50,6 +50,9 @@ dnsfix: $(OBJECTS) libtx.a
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 stunc: stunutil.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+subnet_gen: subnet_gen.o subnet_api.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 include $(THIS_PATH)/libtx/Makefile

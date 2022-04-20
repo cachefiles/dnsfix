@@ -21,6 +21,7 @@
 #include "txall.h"
 #include "txdnsxy.h"
 #include "dnsproto.h"
+#include "subnet_api.h"
 
 #define DNSFMT_CHECK(p, val) if ((p)->err) return val;
 #define DNSFMT_ASSERT(expr, msgfmt) do { \
@@ -144,6 +145,7 @@ static struct cached_client {
 		struct sockaddr sa;
 		struct sockaddr_in in0;
 	} from;
+	struct tx_promise_t promise;
 } __cached_client[4096];
 
 static int __last_index = 0;
@@ -329,6 +331,61 @@ static int is_fakedn(const char *name)
 
 		assert(len > 0);
 		if (strncmp(_fakedn_matcher + i, cache, len) == 0) {
+			return 1;
+		}
+
+		i += len;
+	}
+
+	return 0;
+}
+
+static int _okaydn_ptr = 0;
+static char _okaydn_matcher[8192*1024];
+
+int add_okaydn(const char *dn)
+{
+	char *ptr, *optr;
+	const char *p = dn + strlen(dn);
+
+	ptr = &_okaydn_matcher[_okaydn_ptr];
+
+	optr = ptr;
+	while (p-- > dn) {
+		*++ptr = *p;
+		_okaydn_ptr++;
+	}
+
+	if (optr != ptr) {
+		*optr = (ptr - optr);
+		_okaydn_ptr++;
+		*++ptr = 0;
+	}
+
+	return 0;
+}
+
+static int is_okaydn(const char *name)
+{
+	int i, len;
+	char *ptr, cache[256];
+	const char *p = name + strlen(name);
+
+	ptr = cache;
+	assert((p - name) < sizeof(cache));
+
+	while (p-- > name) {
+		*ptr++ = *p;
+	}
+	*ptr++ = '.';
+	*ptr = 0;
+
+	ptr = cache;
+	for (i = 0; i < _okaydn_ptr; ) {
+		len = (_okaydn_matcher[i++] & 0xff);
+
+		assert(len > 0);
+		if (strncmp(_okaydn_matcher + i, cache, len) == 0) {
 			return 1;
 		}
 
@@ -760,12 +817,42 @@ static int (*dns_query_hook)(int fd, struct dns_parser *parser, struct sockaddr_
 static int (*dns_tr_request)(struct dns_parser *parser) = get_suffixes_forward;
 static int (*dns_tr_response)(struct dns_parser *parser) = get_suffixes_backward;
 
+
+static int setup_route(uint32_t ipv4)
+{
+    char sTarget[128], sNetwork[128];
+	uint32_t target = htonl(ipv4);
+	subnet_t *subnet = lookupRoute(target);
+
+	inet_ntop(AF_INET, &ipv4, sTarget, sizeof(sTarget));
+
+	if (subnet != 0 && subnet->flags == 0) {
+		unsigned network = htonl(subnet->network);
+
+		inet_ntop(AF_INET, &network, sNetwork, sizeof(sNetwork));
+		fprintf(stderr, "ACTIVE network: %s/%d by %s\n", sNetwork, subnet->prefixlen, sTarget);
+		subnet->flags = 1;
+
+		char sCmd[1024];
+		sprintf(sCmd, "ip route add %s/%d dev tun0 table 20", sNetwork, subnet->prefixlen);
+		fprintf(stderr, "CMD=%s\n", sCmd);
+		system(sCmd);
+	}
+
+	return 0;
+}
+
 int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_in *in_addr1, socklen_t namlen, int fakeresp)
 {
 	int len;
 	int err = 0;
 	char bufout[8192];
+	static char bufward[8192], bufout_suspend[8192];
+	static int last_len = 0, suspend_len = 0;
+	static struct cached_client *last_client = NULL;
+	static struct cached_client *suspend_client = NULL;
 
+	struct dns_question *que;
 	struct cached_client *client;
 	static union { struct sockaddr sa; struct sockaddr_in in0; } dns;
 
@@ -783,28 +870,126 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 			return 0;
 		}
 		parser.head.ident = client->l_ident;
-		len = (*dns_tr_response)(&parser);
+		// len = (*dns_tr_response)(&parser);
+
+		for (int i = 0; i < parser.head.question; i++) {
+			struct dns_question *que;
+			que = &parser.question[i];
+			LOG_DEBUG("response questin: %s\n", que->domain);
+		}
+
+		int type = 0, found = 0, found1 = 0, have_cname = 0; 
+		if (parser.head.question == 1) {
+			type = parser.question[0].type;
+			for (int i = 0; i < parser.head.answer; i++) {
+				if (parser.answer[i].type == NSTYPE_A) {
+					if (type == NSTYPE_A) {
+						/* check ipv4 */
+						unsigned *v4addrp = (unsigned *)parser.answer[i].value;
+						setup_route(*v4addrp);
+					}
+					found1 = 1;
+				} else if (parser.answer[i].type == NSTYPE_CNAME) {
+					have_cname = 1;
+				} else if (parser.answer[i].type == type) {
+					found = 1;
+				}
+			}
+
+			if (in_addr1->sin_addr.s_addr == inet_addr("192.58.128.30")) {
+				int isnew = 0;
+				if (found == 0 && found1 == 1 && type != NSTYPE_A) {
+					LOG_DEBUG("bad query anser: %s\n", parser.question[0].domain);
+					isnew = !is_fakedn(parser.question[0].domain);
+					add_fakedn(parser.question[0].domain);
+				} else if (!is_fakedn(parser.question[0].domain)){
+					LOG_DEBUG("good query anser: %s\n", parser.question[0].domain);
+					isnew = !is_okaydn(parser.question[0].domain);
+					add_okaydn(parser.question[0].domain);
+				}
+
+				dns.in0.sin_family = AF_INET;
+				dns.in0.sin_port = htons(53);
+				LOG_DEBUG("resume %p %p %p", last_client, client, suspend_client);
+				if (last_client == client && is_fakedn(parser.question[0].domain)) {
+					dns.in0.sin_addr.s_addr = inet_addr("8.8.8.8");
+					if (isnew)
+					len = sendto(up->outfd, bufward, last_len, 0, &dns.sa, sizeof(dns.sa));
+			        LOG_DEBUG("forward %d %d", last_len, len);
+				} else if (suspend_client == client && is_okaydn(parser.question[0].domain)) {
+					if (isnew) {
+						len = sendto(up->sockfd, bufout_suspend, suspend_len, 0, &client->from.sa, sizeof(client->from));
+					}
+			        LOG_DEBUG("delivery %d %d", suspend_len, len);
+				}
+				return 0;
+			} else {
+				if (have_cname == 0 && parser.head.answer == 1
+						&& is_fakedn(parser.question[0].domain) && in_addr1->sin_addr.s_addr != inet_addr("8.8.8.8")) {
+					LOG_DEBUG("drop response %d", last_client == client);
+					return 0;
+				}
+				if (have_cname == 0 && parser.head.answer == 1
+						&& !is_okaydn(parser.question[0].domain) && !is_fakedn(parser.question[0].domain)) {
+					LOG_DEBUG("wait for more response is last %d", last_client == client);
+					suspend_client = client;
+					suspend_len = dns_build(&parser, (uint8_t *)bufout_suspend, sizeof(bufout_suspend));
+					return 0;
+				}
+			}
+		}
 
 		len = dns_build(&parser, (uint8_t *)bufout, sizeof(bufout));
 		len > 0 && (err = sendto(up->sockfd, bufout, len, 0, &client->from.sa, sizeof(client->from)));
-		LOG_DEBUG("sendto client %d/%d, %x 0x%x", err, errno, client->flags, client->l_ident);
-	} else if (!dns_query_hook(up->sockfd, &parser, in_addr1)) {
+		// LOG_DEBUG("sendto client %d/%d, %x 0x%x", err, errno, client->flags, client->l_ident);
+	} else {
 		int index = (__last_index++ & 0xFFF);
 		client = &__cached_client[index];
 		memcpy(&client->from, in_addr1, namlen);
 		client->l_ident = (parser.head.ident);
 		client->r_ident = (rand() & 0xF000) | index;
 		client->len_cached = 0;
-		len = (*dns_tr_request)(&parser);
+		// len = (*dns_tr_request)(&parser);
 		parser.head.ident = (client->r_ident);
-		len = dns_build(&parser, (uint8_t *)bufout, sizeof(bufout));
 		//dnsoutp->q_flags |= htons(0x100);
+
+		for (int i = 0; i < parser.head.question; i++) {
+			que = &parser.question[i];
+			LOG_DEBUG("query domain: %s\n", que->domain);
+		}
 
 		dns.in0.sin_family = AF_INET;
 		dns.in0.sin_port = up->forward.port;
 		dns.in0.sin_addr.s_addr = up->forward.address;
-		len > 0 && (err = sendto(up->outfd, bufout, len, 0, &dns.sa, sizeof(dns.sa)));
-		LOG_DEBUG("sendto server %d/%d, %x %d, %s 0x%x", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr), client->l_ident);
+		if (is_fakedn(parser.question[0].domain)) {
+			dns.in0.sin_addr.s_addr = inet_addr("8.8.8.8");
+			len = dns_build(&parser, (uint8_t *)bufout, sizeof(bufout));
+			len > 0 && (err = sendto(up->outfd, bufout, len, 0, &dns.sa, sizeof(dns.sa)));
+			LOG_DEBUG("sendto server real %d/%d, %x %d, %s 0x%x", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr), client->l_ident);
+			return 0;
+		}
+
+		len = dns_build(&parser, (uint8_t *)bufward, sizeof(bufward));
+		last_client = client;
+		last_len = len;
+
+		len > 0 && (err = sendto(up->outfd, bufward, len, 0, &dns.sa, sizeof(dns.sa)));
+		LOG_DEBUG("sendto server real %d/%d, %x %d, %s 0x%x", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr), client->l_ident);
+
+		// @192.58.128.30
+		dns.in0.sin_family = AF_INET;
+		dns.in0.sin_port = up->forward.port;
+		dns.in0.sin_addr.s_addr = inet_addr("192.58.128.30");
+		for (int i = 0; i < parser.head.question; i++) {
+			que = &parser.question[i];
+			que->type = (que->type == NSTYPE_MX? NSTYPE_SRV: NSTYPE_MX);
+		}
+
+		if (!is_fakedn(parser.question[0].domain) && !is_okaydn(parser.question[0].domain)) {
+			len = dns_build(&parser, (uint8_t *)bufout, sizeof(bufout));
+			len > 0 && (err = sendto(up->outfd, bufout, len, 0, &dns.sa, sizeof(dns.sa)));
+			LOG_DEBUG("sendto server check %d/%d, %x %d, %s 0x%x", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr), client->l_ident);
+		}
 	}
 
 	return 0;

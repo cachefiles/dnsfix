@@ -23,6 +23,9 @@
 #include "dnsproto.h"
 #include "subnet_api.h"
 
+typedef unsigned char u_char;
+typedef unsigned long u_long;
+
 #define DNSFMT_CHECK(p, val) if ((p)->err) return val;
 #define DNSFMT_ASSERT(expr, msgfmt) do { \
 	if (expr); else { printf msgfmt; dpt->err = 1; return 0; } \
@@ -834,7 +837,8 @@ static int setup_route(uint32_t ipv4)
 		subnet->flags = 1;
 
 		char sCmd[1024];
-		sprintf(sCmd, "ip route add %s/%d dev tun0 table 20", sNetwork, subnet->prefixlen);
+		// sprintf(sCmd, "ip route add %s/%d dev tun0 table 20", sNetwork, subnet->prefixlen);
+		sprintf(sCmd, "ipset add ipsec %s/%d", sNetwork, subnet->prefixlen);
 		fprintf(stderr, "CMD=%s\n", sCmd);
 		system(sCmd);
 	}

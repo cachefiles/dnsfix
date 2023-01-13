@@ -247,6 +247,11 @@ int main(int argc, char *argv[])
         if (skip-- > 0)
             continue;
 
+        if (strcmp(argv[i], "-h") == 0) {
+            fprintf(stderr, "%s -h -i <include> -e <exclude> -t <reset>  -q query exclude-file-list\n", argv[0]);
+            exit(0);
+        }
+
         if (i + 1 < argc &&
                 strcmp(argv[i], "-i") == 0) {
             skip = 1;
@@ -264,29 +269,29 @@ int main(int argc, char *argv[])
         if (i + 1 < argc &&
                 strcmp(argv[i], "-t") == 0) {
             skip = 1;
-			initRoute(argv[i + skip]);
+            initRoute(argv[i + skip]);
             continue;
         }
 
         if (i + 1 < argc &&
                 strcmp(argv[i], "-q") == 0) {
             skip = 1;
-			if (query == 0) {
-				qsort(_net_list, _net_count, sizeof(_net_list[0]), subnet_compare);
-				query = 1;
-			}
-			queryRoute(inet_addr(argv[i + 1]));
+            if (query == 0) {
+                qsort(_net_list, _net_count, sizeof(_net_list[0]), subnet_compare);
+                query = 1;
+            }
+            queryRoute(inet_addr(argv[i + 1]));
             continue;
         }
 
-		if (_net_count == 0)
-			initRoute("DEFAULT");
+        if (_net_count == 0)
+            initRoute("DEFAULT");
 
-		loadRoute(argv[i], excludeNetwork);
+        loadRoute(argv[i], excludeNetwork);
     }
 
-	if (query == 0)
-		dumpRoute();
+    if (query == 0)
+        dumpRoute();
 
     return 0;
 }

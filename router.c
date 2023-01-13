@@ -13,6 +13,8 @@
 #include <ws2tcpip.h>
 #endif
 
+typedef unsigned long u_long;
+
 #include <router.h>
 
 #define ARRAY_SIZE(array) (sizeof(array) / sizeof(array[0]))

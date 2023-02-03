@@ -950,6 +950,11 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 					break;
 				}
 			}
+
+			if (parser->head.answer == 0 &&
+					parser->head.author > 1 && parser->head.addon > 1) {
+				client->nopoisoning = 1;
+			}
 		}
 
 	}
@@ -959,9 +964,23 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 
 int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser)
 {
+	int err, len;
+	char *bufward;
+
 	if (client->status == STATUS_INITIAL && parser->head.question > 0) {
 		client->status = STATUS_WAIT_RESPONSE;
 	} else if (client->status == STATUS_WAIT_RESPONSE) {
+		if ((parser->head.flags & 0x8000) && (parser->head.answer > 0)
+				&& client->nopoisoning == 0 && client->poisoning == 0) {
+			client->len_cached = dns_build(parser, (uint8_t*)client->pair_cached, sizeof(client->pair_cached));
+		}
+
+		if (client->len_cached > 0 && client->nopoisoning) {
+			len = client->len_cached;
+			bufward = client->pair_cached;
+			err = sendto(up->sockfd, bufward, len, 0, &client->from.sa, sizeof(client->from));
+			client->status = STATUS_DONE;
+		}
 		LOG_DEBUG("poisoning: %d nopoisoning: %d", client->poisoning, client->nopoisoning);
 	}
 
@@ -1058,6 +1077,11 @@ int forward_without_poisoning(dns_udp_context_t *up, struct cached_client *clien
 	if ((parser->head.flags & 0x8000) && client->poisoning &&
 			in_addr1->sin_addr.s_addr == inet_addr("8.8.8.8") &&
 			(client->status == STATUS_WAIT_RESPONSE)) {
+		if (parser->head.addon == 0) {
+			LOG_DEBUG("forward_without_poisoning: drop poisoning packet");
+			return -1;
+		}
+
 		len = dns_build(parser, (uint8_t *)bufward, sizeof(bufward));
 		if (len <= 0) {
 			LOG_DEBUG("forward_without_poisoning: dns_build error");
@@ -1111,7 +1135,10 @@ int process_client_event(dns_udp_context_t *up,
 
 	LOG_DEBUG("FROM: %s\n", inet_ntoa(in_addr1->sin_addr));
 	forward_prehook(up, client, parser);
-	if (in_addr1->sin_addr.s_addr == inet_addr("198.97.190.53")) return 0;
+	if (in_addr1->sin_addr.s_addr == inet_addr("198.97.190.53")) {
+		forward_posthook(up, client, parser);
+		return 0;
+	}
 	forward_allow_poisoning(up, client, parser, in_addr1);
 	forward_without_poisoning(up, client, parser, in_addr1);
 	forward_detect_poisoning(up, client, parser);

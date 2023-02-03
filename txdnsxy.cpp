@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
+#include <time.h>
 #include <stdlib.h>
 
 #include <netinet/in.h>
@@ -32,8 +33,8 @@ typedef unsigned long u_long;
 } while ( 0 )
 
 static int _is_client = 0;
-static char SUFFIXES[128] = ".n.yiz.me";
-static char SUFFIXES_FORMAT[128] = "%s.n.yiz.me";
+static char SUFFIXES[128] = ".pac.yiz.me";
+static char SUFFIXES_FORMAT[128] = "%s.pac.yiz.me";
 
 #if 0
 QR: 1;
@@ -137,6 +138,9 @@ static int config_ip_rule(const uint8_t t[])
 
 static struct cached_client {
 	int flags;
+	int rewrap;
+	int status;
+	int poisoning, nopoisoning;
 	unsigned short r_ident;
 	unsigned short l_ident;
 
@@ -148,7 +152,6 @@ static struct cached_client {
 		struct sockaddr sa;
 		struct sockaddr_in in0;
 	} from;
-	struct tx_promise_t promise;
 } __cached_client[4096];
 
 static int __last_index = 0;
@@ -290,6 +293,16 @@ static int is_fakeip(const void *valout)
 
 static int _fakedn_ptr = 0;
 static char _fakedn_matcher[8192*1024];
+static time_t _fakedn_touch = 0;
+
+void update_fakedn(void)
+{
+	if (_fakedn_touch + 6000 < time(NULL)) {
+		_fakedn_touch = time(NULL);
+		_fakedn_ptr = 0;
+	}
+}
+
 
 int add_fakedn(const char *dn)
 {
@@ -300,6 +313,7 @@ int add_fakedn(const char *dn)
 
 	optr = ptr;
 	while (p-- > dn) {
+		assert (ptr < _fakedn_matcher + sizeof(_fakedn_matcher));
 		*++ptr = *p;
 		_fakedn_ptr++;
 	}
@@ -307,6 +321,7 @@ int add_fakedn(const char *dn)
 	if (optr != ptr) {
 		*optr = (ptr - optr);
 		_fakedn_ptr++;
+		assert (ptr < _fakedn_matcher + sizeof(_fakedn_matcher));
 		*++ptr = 0;
 	}
 
@@ -345,6 +360,15 @@ static int is_fakedn(const char *name)
 
 static int _okaydn_ptr = 0;
 static char _okaydn_matcher[8192*1024];
+static time_t _okaydn_touch = 0;
+
+void update_okaydn(void)
+{
+	if (_okaydn_touch + 600 < time(NULL)) {
+		_okaydn_touch = time(NULL);
+		_okaydn_ptr = 0;
+	}
+}
 
 int add_okaydn(const char *dn)
 {
@@ -355,11 +379,13 @@ int add_okaydn(const char *dn)
 
 	optr = ptr;
 	while (p-- > dn) {
+		assert (ptr < _okaydn_matcher + sizeof(_okaydn_matcher));
 		*++ptr = *p;
 		_okaydn_ptr++;
 	}
 
 	if (optr != ptr) {
+		assert (ptr < _okaydn_matcher + sizeof(_okaydn_matcher));
 		*optr = (ptr - optr);
 		_okaydn_ptr++;
 		*++ptr = 0;
@@ -527,7 +553,7 @@ dst_buf = dns_addon_addA(dst_buf, "f.root-servers.net", nsttl, htons(dnscls), in
 dst_buf = dns_addon_addA(dst_buf, "g.root-servers.net", nsttl, htons(dnscls), inet_addr("192.112.36.4"));
 dst_buf = dns_addon_addA(dst_buf, "h.root-servers.net", nsttl, htons(dnscls), inet_addr("198.97.190.53"));
 dst_buf = dns_addon_addA(dst_buf, "i.root-servers.net", nsttl, htons(dnscls), inet_addr("192.36.148.17"));
-dst_buf = dns_addon_addA(dst_buf, "j.root-servers.net", nsttl, htons(dnscls), inet_addr("192.58.128.30"));
+dst_buf = dns_addon_addA(dst_buf, "j.root-servers.net", nsttl, htons(dnscls), inet_addr("114.114.114.114"));
 dst_buf = dns_addon_addA(dst_buf, "k.root-servers.net", nsttl, htons(dnscls), inet_addr("193.0.14.129"));
 dst_buf = dns_addon_addA(dst_buf, "l.root-servers.net", nsttl, htons(dnscls), inet_addr("199.7.83.42"));
 dst_buf = dns_addon_addA(dst_buf, "m.root-servers.net", nsttl, htons(dnscls), inet_addr("202.12.27.33"));
@@ -744,7 +770,7 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 	if (dns_rcode == RCODE_NXDOMAIN) {
 		struct dns_soa *psoa = (struct dns_soa *)parser->author[0].value;
 
-		psoa->name_server = "p.yrli.bid";
+		psoa->name_server = SUFFIXES + 1;
 		psoa->admin_email = "pagx.163.com";
 		psoa->serial = 18000;
 		psoa->day2 = 18000;
@@ -752,7 +778,7 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 		psoa->day4 = 18000;
 		psoa->day5 = 18000;
 
-		parser->author[0].domain = "domain.p.yrli.bid";
+		parser->author[0].domain = "domain.pac.yrli.bid";
 		parser->author[0].klass = parser->question[0].klass;
 		parser->author[0].type = NSTYPE_SOA;
 		parser->author[0].ttl  = 3600;
@@ -845,16 +871,259 @@ static int setup_route(uint32_t ipv4)
 
 	return 0;
 }
+ 
+int dns_send_response(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *req, struct dns_parser *resp, const char *value)
+{
+       
+    int err;
+    int len = 0;
+    char domain[256];
+    char bufout[8192];
+
+    struct dns_parser *parser = req? req: resp;
+
+    if (client->rewrap) 
+	encrypt_domain(domain, parser->question[0].domain);
+    else
+	strcpy(domain, parser->question[0].domain);
+
+    parser->head.ident = client->l_ident;
+    parser->question[0].domain = domain;
+    parser->question[0].type = NSTYPE_A;
+
+    parser->head.flags  &= NSFLAG_RD;
+    parser->head.flags  |= (NSFLAG_QR| NSFLAG_AA);
+
+    parser->head.answer = 0;
+    parser->head.author = 0;
+    parser->head.addon = 0;
+
+    parser->answer[0].domain = domain;
+    parser->answer[0].klass = parser->question[0].klass;
+    parser->answer[0].type = parser->question[0].type;
+    parser->answer[0].ttl  = 360;
+    parser->answer[0].len  = 4;
+
+    u_long in_addr = inet_addr(value);
+    memcpy(parser->answer[0].value, &in_addr, sizeof(in_addr));
+    parser->head.answer = 1;
+
+    len = dns_build(parser, (uint8_t *)bufout, sizeof(bufout));
+    len > 0 && (err = sendto(up->sockfd, bufout, len, 0, &client->from.sa, sizeof(client->from)));
+    return 0;
+}
+
+enum {STATUS_INITIAL, STATUS_WAIT_RESPONSE, STATUS_DONE};
+
+int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser)
+{
+	int atype, qtype, i;
+
+	if (client->status == STATUS_INITIAL && parser->head.question > 0) {
+		if (is_fakedn(parser->question[0].domain) && parser->question[0].type == NSTYPE_A) {
+			// dns_send_response(up, client, &parser, NULL, "1.1.1.1");
+			LOG_DEBUG("forward_prehook dns_send_response 1.1.1.1");
+			client->status = STATUS_DONE;
+			return 0;
+		}
+		client->poisoning = 0;
+		client->nopoisoning = 0;
+	}
+
+	if ((parser->head.flags & 0x8000) &&
+			(client->status == STATUS_WAIT_RESPONSE)) {
+
+		qtype = parser->question[0].type;
+		atype = parser->answer[0].type;
+		LOG_DEBUG("qtype: %d, atype: %d", atype, qtype);
+		if (parser->head.question == 1 && parser->head.answer == 1 &&
+				qtype != atype && (atype == NSTYPE_A || qtype == NSTYPE_AAAA)) {
+			client->poisoning = 1;
+		}
+
+		if (parser->head.answer > 1) {
+			client->nopoisoning = 1;
+		} else if (!client->poisoning) {
+			for (i = 0; i < parser->head.answer; i++) {
+				if (parser->answer[i].type == NSTYPE_CNAME) {
+					client->nopoisoning = 1;
+					break;
+				}
+			}
+		}
+
+	}
+
+	return 0;
+}
+
+int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser)
+{
+	if (client->status == STATUS_INITIAL && parser->head.question > 0) {
+		client->status = STATUS_WAIT_RESPONSE;
+	} else if (client->status == STATUS_WAIT_RESPONSE) {
+		LOG_DEBUG("poisoning: %d nopoisoning: %d", client->poisoning, client->nopoisoning);
+	}
+
+	return 0;
+}
+
+int forward_allow_poisoning(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser, struct sockaddr_in *in_addr1)
+{
+	int err, len;
+	char bufward[4096];
+	struct sockaddr_in in0;
+	struct dns_parser p0 = *parser;
+
+	if (client->status == STATUS_INITIAL && parser->head.question > 0) {
+
+		in0.sin_family = AF_INET;
+		in0.sin_port = htons(53);
+		in0.sin_addr.s_addr = inet_addr("223.5.5.5");
+
+		p0.head.flags |= NSFLAG_RD;
+		if (p0.head.addon == 0) {
+			p0.head.addon = 1;
+			p0.addon[0].domain = "";
+			p0.addon[0].klass = 0x1000;
+			p0.addon[0].type = NSTYPE_OPT;
+			p0.addon[0].ttl  = 0;
+			p0.addon[0].len  = 10;
+			const void ** valp = (const void **)p0.addon[0].value;
+			*valp = "\x00\x08\x00\x06\x00\x01\x10\x00\x6e\x2a";
+			LOG_DEBUG("add addon record to dns query");
+		}
+
+		len = dns_build(&p0, (uint8_t *)bufward, sizeof(bufward));
+		if (len <= 0) {
+			LOG_DEBUG("forward_allow_poisoning: dns_build error");
+			return -1;
+		}
+
+		err = sendto(up->outfd, bufward, len, 0, (struct sockaddr *)&in0, sizeof(in0));
+	}
+
+	if ((parser->head.flags & 0x8000) && client->nopoisoning &&
+			// in_addr1->sin_addr.s_addr == inet_addr("223.5.5.5") &&
+			(client->status == STATUS_WAIT_RESPONSE)) {
+		len = dns_build(parser, (uint8_t *)bufward, sizeof(bufward));
+		if (len <= 0) {
+			LOG_DEBUG("forward_allow_poisoning: dns_build error");
+			return -1;
+		}
+
+		LOG_DEBUG("forward_allow_poisoning: ");
+		err = sendto(up->sockfd, bufward, len, 0, &client->from.sa, sizeof(client->from));
+		client->status = STATUS_DONE;
+	}
+
+	return 0;
+}
+
+int forward_without_poisoning(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser, struct sockaddr_in *in_addr1)
+{
+	int err, len;
+	char bufward[4096];
+	struct sockaddr_in in0;
+	struct dns_parser p0 = *parser;
+
+	if (client->status == STATUS_INITIAL && parser->head.question > 0) {
+
+		in0.sin_family = AF_INET;
+		in0.sin_port = htons(53);
+		in0.sin_addr.s_addr = inet_addr("8.8.8.8");
+
+		p0.head.flags |= NSFLAG_RD;
+		if (p0.head.addon == 0) {
+			p0.head.addon = 1;
+			p0.addon[0].domain = "";
+			p0.addon[0].klass = 0x1000;
+			p0.addon[0].type = NSTYPE_OPT;
+			p0.addon[0].ttl  = 0;
+			p0.addon[0].len  = 10;
+			const void ** valp = (const void **)p0.addon[0].value;
+			*valp = "\x00\x08\x00\x06\x00\x01\x10\x00\x6e\x2a";
+			LOG_DEBUG("add addon record to dns query");
+		}
+
+		len = dns_build(&p0, (uint8_t *)bufward, sizeof(bufward));
+		if (len <= 0) {
+			LOG_DEBUG("forward_without_poisoning: dns_build error");
+			return -1;
+		}
+
+		err = sendto(up->outfd, bufward, len, 0, (struct sockaddr *)&in0, sizeof(in0));
+	}
+
+	if ((parser->head.flags & 0x8000) && client->poisoning &&
+			in_addr1->sin_addr.s_addr == inet_addr("8.8.8.8") &&
+			(client->status == STATUS_WAIT_RESPONSE)) {
+		len = dns_build(parser, (uint8_t *)bufward, sizeof(bufward));
+		if (len <= 0) {
+			LOG_DEBUG("forward_without_poisoning: dns_build error");
+			return -1;
+		}
+
+		LOG_DEBUG("forward_without_poisoning: ");
+		err = sendto(up->sockfd, bufward, len, 0, &client->from.sa, sizeof(client->from));
+		client->status = STATUS_DONE;
+	}
+
+	return 0;
+}
+
+int forward_detect_poisoning(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser)
+{
+	int err, len;
+	char bufward[4096];
+	struct sockaddr_in in0;
+	struct dns_question *que;
+	struct dns_parser p0 = *parser;
+
+	if (client->status != STATUS_INITIAL || parser->head.question == 0) {
+		return 0;
+	}
+
+	p0.head.flags &= ~NSFLAG_RD;
+	for (int i = 0; i < p0.head.question; i++) {
+		que = &p0.question[i];
+		que->type = (que->type == NSTYPE_MX? NSTYPE_SRV: NSTYPE_MX);
+	}
+
+	len = dns_build(&p0, (uint8_t *)bufward, sizeof(bufward));
+	if (len <= 0) {
+		LOG_DEBUG("forward_detect_poisoning: dns_build error");
+		return -1;
+	}
+
+	in0.sin_family = AF_INET;
+	in0.sin_port = htons(53);
+	in0.sin_addr.s_addr = inet_addr("198.97.190.53");
+
+	err = sendto(up->outfd, bufward, len, 0, (struct sockaddr *)&in0, sizeof(in0));
+
+	return 0;
+}
+
+int process_client_event(dns_udp_context_t *up,
+		struct cached_client *client, struct dns_parser *parser, struct sockaddr_in *in_addr1, socklen_t namlen)
+{
+
+	LOG_DEBUG("FROM: %s\n", inet_ntoa(in_addr1->sin_addr));
+	forward_prehook(up, client, parser);
+	if (in_addr1->sin_addr.s_addr == inet_addr("198.97.190.53")) return 0;
+	forward_allow_poisoning(up, client, parser, in_addr1);
+	forward_without_poisoning(up, client, parser, in_addr1);
+	forward_detect_poisoning(up, client, parser);
+	forward_posthook(up, client, parser);
+
+	return 0;
+}
 
 int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_in *in_addr1, socklen_t namlen, int fakeresp)
 {
 	int len;
 	int err = 0;
-	char bufout[8192];
-	static char bufward[8192], bufout_suspend[8192];
-	static int last_len = 0, suspend_len = 0;
-	static struct cached_client *last_client = NULL;
-	static struct cached_client *suspend_client = NULL;
 
 	struct dns_question *que;
 	struct cached_client *client;
@@ -866,32 +1135,36 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 		return -1;
 	}
 
+	int index = (__last_index & 0xFFF);
 	if (parser.head.flags & 0x8000) {
 		int ident = parser.head.ident;
 		client = &__cached_client[ident & 0xFFF];
+
 		if (client->r_ident != ident) {
 			LOG_DEBUG("get unexpected response, just return");
 			return 0;
 		}
+
 		parser.head.ident = client->l_ident;
-		// len = (*dns_tr_response)(&parser);
+	} else {
+		client = &__cached_client[index];
+		memcpy(&client->from, in_addr1, namlen);
+		client->l_ident = (parser.head.ident);
+		client->r_ident = (rand() & 0xF000) | index;
+		client->len_cached = client->status = 0;
+		parser.head.ident = (client->r_ident);
+	}
 
-		for (int i = 0; i < parser.head.question; i++) {
-			struct dns_question *que;
-			que = &parser.question[i];
-			LOG_DEBUG("response questin: %s\n", que->domain);
-		}
+	process_client_event(up, client, &parser, in_addr1, namlen);
 
-		int type = 0, found = 0, found1 = 0, have_cname = 0; 
+	return 0;
+}
+
+#if 0
 		if (parser.head.question == 1) {
 			type = parser.question[0].type;
 			for (int i = 0; i < parser.head.answer; i++) {
 				if (parser.answer[i].type == NSTYPE_A) {
-					if (type == NSTYPE_A) {
-						/* check ipv4 */
-						unsigned *v4addrp = (unsigned *)parser.answer[i].value;
-						setup_route(*v4addrp);
-					}
 					found1 = 1;
 				} else if (parser.answer[i].type == NSTYPE_CNAME) {
 					have_cname = 1;
@@ -900,104 +1173,28 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 				}
 			}
 
-			if (in_addr1->sin_addr.s_addr == inet_addr("192.58.128.30")) {
+			if (in_addr1->sin_addr.s_addr == inet_addr("114.114.114.114")) {
 				int isnew = 0;
 				if (found == 0 && found1 == 1 && type != NSTYPE_A) {
 					LOG_DEBUG("bad query anser: %s\n", parser.question[0].domain);
 					isnew = !is_fakedn(parser.question[0].domain);
-					add_fakedn(parser.question[0].domain);
+					if (isnew) add_fakedn(parser.question[0].domain);
 				} else if (!is_fakedn(parser.question[0].domain)){
 					LOG_DEBUG("good query anser: %s\n", parser.question[0].domain);
 					isnew = !is_okaydn(parser.question[0].domain);
-					add_okaydn(parser.question[0].domain);
+					if (isnew) add_okaydn(parser.question[0].domain);
 				}
 
-				dns.in0.sin_family = AF_INET;
-				dns.in0.sin_port = htons(53);
 				LOG_DEBUG("resume %p %p %p", last_client, client, suspend_client);
-				if (last_client == client && is_fakedn(parser.question[0].domain)) {
-					dns.in0.sin_addr.s_addr = inet_addr("8.8.8.8");
-					if (isnew)
-					len = sendto(up->outfd, bufward, last_len, 0, &dns.sa, sizeof(dns.sa));
-			        LOG_DEBUG("forward %d %d", last_len, len);
+				if (/* last_client == client && */ is_fakedn(parser.question[0].domain)) {
+				    LOG_DEBUG("send response with block ip %d %d", last_len, len);
+				    dns_send_response(up, client, NULL, &parser, "1.1.1.1");
 				} else if (suspend_client == client && is_okaydn(parser.question[0].domain)) {
-					if (isnew) {
-						len = sendto(up->sockfd, bufout_suspend, suspend_len, 0, &client->from.sa, sizeof(client->from));
-					}
-			        LOG_DEBUG("delivery %d %d", suspend_len, len);
+				    len = sendto(up->sockfd, bufout_suspend, suspend_len, 0, &client->from.sa, sizeof(client->from));
+				    LOG_DEBUG("delivery %d %d", suspend_len, len);
 				}
-				return 0;
-			} else {
-				if (have_cname == 0 && parser.head.answer == 1
-						&& is_fakedn(parser.question[0].domain) && in_addr1->sin_addr.s_addr != inet_addr("8.8.8.8")) {
-					LOG_DEBUG("drop response %d", last_client == client);
-					return 0;
-				}
-				if (have_cname == 0 && parser.head.answer == 1
-						&& !is_okaydn(parser.question[0].domain) && !is_fakedn(parser.question[0].domain)) {
-					LOG_DEBUG("wait for more response is last %d", last_client == client);
-					suspend_client = client;
-					suspend_len = dns_build(&parser, (uint8_t *)bufout_suspend, sizeof(bufout_suspend));
-					return 0;
-				}
-			}
-		}
 
-		len = dns_build(&parser, (uint8_t *)bufout, sizeof(bufout));
-		len > 0 && (err = sendto(up->sockfd, bufout, len, 0, &client->from.sa, sizeof(client->from)));
-		// LOG_DEBUG("sendto client %d/%d, %x 0x%x", err, errno, client->flags, client->l_ident);
-	} else {
-		int index = (__last_index++ & 0xFFF);
-		client = &__cached_client[index];
-		memcpy(&client->from, in_addr1, namlen);
-		client->l_ident = (parser.head.ident);
-		client->r_ident = (rand() & 0xF000) | index;
-		client->len_cached = 0;
-		// len = (*dns_tr_request)(&parser);
-		parser.head.ident = (client->r_ident);
-		//dnsoutp->q_flags |= htons(0x100);
-
-		for (int i = 0; i < parser.head.question; i++) {
-			que = &parser.question[i];
-			LOG_DEBUG("query domain: %s\n", que->domain);
-		}
-
-		dns.in0.sin_family = AF_INET;
-		dns.in0.sin_port = up->forward.port;
-		dns.in0.sin_addr.s_addr = up->forward.address;
-		if (is_fakedn(parser.question[0].domain)) {
-			dns.in0.sin_addr.s_addr = inet_addr("8.8.8.8");
-			len = dns_build(&parser, (uint8_t *)bufout, sizeof(bufout));
-			len > 0 && (err = sendto(up->outfd, bufout, len, 0, &dns.sa, sizeof(dns.sa)));
-			LOG_DEBUG("sendto server real %d/%d, %x %d, %s 0x%x", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr), client->l_ident);
-			return 0;
-		}
-
-		len = dns_build(&parser, (uint8_t *)bufward, sizeof(bufward));
-		last_client = client;
-		last_len = len;
-
-		len > 0 && (err = sendto(up->outfd, bufward, len, 0, &dns.sa, sizeof(dns.sa)));
-		LOG_DEBUG("sendto server real %d/%d, %x %d, %s 0x%x", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr), client->l_ident);
-
-		// @192.58.128.30
-		dns.in0.sin_family = AF_INET;
-		dns.in0.sin_port = up->forward.port;
-		dns.in0.sin_addr.s_addr = inet_addr("192.58.128.30");
-		for (int i = 0; i < parser.head.question; i++) {
-			que = &parser.question[i];
-			que->type = (que->type == NSTYPE_MX? NSTYPE_SRV: NSTYPE_MX);
-		}
-
-		if (!is_fakedn(parser.question[0].domain) && !is_okaydn(parser.question[0].domain)) {
-			len = dns_build(&parser, (uint8_t *)bufout, sizeof(bufout));
-			len > 0 && (err = sendto(up->outfd, bufout, len, 0, &dns.sa, sizeof(dns.sa)));
-			LOG_DEBUG("sendto server check %d/%d, %x %d, %s 0x%x", err, errno, client->flags, index, inet_ntoa(in_addr1->sin_addr), client->l_ident);
-		}
-	}
-
-	return 0;
-}
+#endif
 
 static void do_dns_udp_recv(void *upp)
 {
@@ -1007,6 +1204,8 @@ static void do_dns_udp_recv(void *upp)
 	struct sockaddr_in in_addr1;
 	dns_udp_context_t *up = (dns_udp_context_t *)upp;
 
+	update_okaydn();
+	update_fakedn();
 	while (tx_readable(&up->file)) {
 		in_len1 = sizeof(in_addr1);
 		count = recvfrom(up->sockfd, buf, sizeof(buf), 0,

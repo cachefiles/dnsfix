@@ -32,9 +32,23 @@ typedef unsigned long u_long;
 	if (expr); else { printf msgfmt; dpt->err = 1; return 0; } \
 } while ( 0 )
 
+struct dns_soa {
+	const char *name_server;
+	const char *admin_email;
+	uint32_t serial;
+	uint32_t day2;
+	uint32_t day3;
+	uint32_t day4;
+	uint32_t day5;
+};
+
 static int _is_client = 0;
 static char SUFFIXES[128] = ".pac.yiz.me";
 static char SUFFIXES_FORMAT[128] = "%s.pac.yiz.me";
+
+static char DETECT_SERVER[64] = "198.97.190.53";
+static char SECURITY_SERVER[64] = "8.8.8.8";
+static char POISONING_SERVER[64] = "223.5.5.5";
 
 #if 0
 QR: 1;
@@ -102,9 +116,9 @@ void encrypt_domain(char *dst, const char *src)
 	return;
 }
 
-char * decrypt_domain(char *name)
+char * decrypt_domain(char *dst, const char *src)
 {
-	char *n = name;
+	const char *n = src;
 	size_t ln = -1;
 	size_t lt = strlen(SUFFIXES);
 
@@ -114,9 +128,9 @@ char * decrypt_domain(char *name)
 
 	ln = strlen(n);
 	if (lt < ln && strcasecmp(n + ln - lt, SUFFIXES) == 0) {
-		n[ln - lt] = 0;
-		for (int l = 0; l < ln - lt; l++) n[l] = __map_code(n[l]);
-		return name;
+		dst[ln - lt] = 0;
+		for (int l = 0; l < ln - lt; l++) dst[l] = __map_code(n[l]);
+		return dst;
 	}
 
 	return NULL;
@@ -451,56 +465,6 @@ const char *dns_type(int type)
 	return _unkown_type;
 }
 
-int get_suffixes_forward(struct dns_parser *parser)
-{
-	char name[256], text[256];
-	static char nambuf[4096];
-	struct dns_question *que;
-	struct dns_resource *res;
-
-	char *dotp = nambuf;
-	char *dotp_limit = nambuf + sizeof(nambuf);
-
-	for (int i = 0; i < parser->head.question && dotp < dotp_limit; i++) {
-		que = &parser->question[i];
-
-		strcpy(name, que->domain);
-		strcpy(text, que->domain);
-		if (!decrypt_domain(name) && 0) {
-			LOG_DEBUG("not allow %s %s", name, dns_type(parser->question[i].type));
-			return 0;
-		}
-
-		if (0x0000 == (parser->head.flags & 0x8100)) {
-			parser->head.flags |= 0x100;
-		}
-
-		que->domain = add_domain(parser, name);
-		if (que->domain == NULL) {
-			return 0;
-		}
-
-		LOG_DEBUG("crypt name %s from %s", name, text);
-	}
-
-	for (int i = 0; i < parser->head.answer; i++) {
-		res = &parser->answer[i];
-
-		const char *orig_name = res->domain;
-		if (strcasecmp(text, res->domain) == 0) {
-			res->domain = parser->question[0].domain;
-		}
-
-		LOG_DEBUG("orig name: %s\n", orig_name);
-		if (res->type == NSTYPE_A &&
-				strcasestr(orig_name, SUFFIXES) != NULL) {
-			config_ip_rule(res->value);
-		}
-	}
-
-	return -1;
-}
-
 int in_list(const char *list, const char *name)
 {
 	int test = 0;
@@ -660,6 +624,7 @@ static int is_myip_name(const char *test)
 static const char GCM_DOMAIN[] = "mtalk.google.com";
 static const size_t GCM_LEN = sizeof(GCM_DOMAIN) -1;
 
+#if 0
 int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 {
 	int dns_rcode = 0;
@@ -757,18 +722,8 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 		parser->head.flags  |= dns_rcode;
 	}
 
-	struct dns_soa {
-		const char *name_server;
-		const char *admin_email;
-		uint32_t serial;
-		uint32_t day2;
-		uint32_t day3;
-		uint32_t day4;
-		uint32_t day5;
-	};
-
 	if (dns_rcode == RCODE_NXDOMAIN) {
-		struct dns_soa *psoa = (struct dns_soa *)parser->author[0].value;
+		psoa = (struct dns_soa *)parser->author[0].value;
 
 		psoa->name_server = SUFFIXES + 1;
 		psoa->admin_email = "pagx.163.com";
@@ -791,6 +746,7 @@ int self_query_hook(int fd, struct dns_parser *parser, struct sockaddr_in *from)
 
 	return 1;
 }
+#endif
 
 int none_query_hook(int outfd, struct dns_parser *parser, struct sockaddr_in *from)
 {
@@ -842,8 +798,8 @@ int none_query_hook(int outfd, struct dns_parser *parser, struct sockaddr_in *fr
 	return 1;
 }
 
-static int (*dns_query_hook)(int fd, struct dns_parser *parser, struct sockaddr_in *) = self_query_hook;
-static int (*dns_tr_request)(struct dns_parser *parser) = get_suffixes_forward;
+// static int (*dns_query_hook)(int fd, struct dns_parser *parser, struct sockaddr_in *) = self_query_hook;
+// static int (*dns_tr_request)(struct dns_parser *parser) = get_suffixes_forward;
 static int (*dns_tr_response)(struct dns_parser *parser) = get_suffixes_backward;
 
 
@@ -913,6 +869,93 @@ int dns_send_response(dns_udp_context_t *up, struct cached_client *client, struc
     return 0;
 }
 
+int dns_search(const char *domain, const char *list[], int count)
+{
+	int i;
+
+	LOG_DEBUG("dns_search: %s %p, %d\n", domain, list, count);
+	if (domain == NULL) return 0;
+	for (i = 0; i < count; i++) {
+		if (strcmp(domain, list[i]) == 0) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+int dns_rewrap(struct dns_parser *p)
+{
+	int i, soa_fixed = 0, idx = 0;
+	const char *last[56] = {};
+	char qname[2028], *one = qname;
+	struct dns_question *que = NULL;
+	struct dns_resource *res = NULL;
+	struct dns_soa *psoa = NULL;
+
+	for (i = 0;  i < p->head.question; i++) {
+		que = &p->question[i];
+		if (strlen (que->domain) > 3) last[idx++] = que->domain;
+		encrypt_domain(one, que->domain);
+		que->domain = one;
+		one = one + strlen(one) + 1;
+	}
+
+	for (i = 0;  i < p->head.answer; i++) {
+		res = &p->answer[i];
+		if (dns_search(res->domain, last, idx)) {
+			last[idx++] = res->domain;
+			encrypt_domain(one, res->domain);
+			res->domain = one;
+			one = one + strlen(one) + 1;
+		}
+	}
+
+	for (i = 0;  i < p->head.author; i++) {
+		res = &p->author[i];
+		if (res->type == NSTYPE_SOA) {
+			p->author[0] = *res;
+			soa_fixed = 1;
+			break;
+		}
+
+		if (dns_search(res->domain, last, idx)) {
+			last[idx++] = res->domain;
+			encrypt_domain(one, res->domain);
+			res->domain = one;
+			one = one + strlen(one) + 1;
+		}
+	}
+
+	if (soa_fixed) {
+		res = &p->author[0];
+		res->domain = SUFFIXES + 1;
+		psoa = (struct dns_soa *)res->value;
+
+		psoa->name_server = "one.cachefiles.net";
+		psoa->admin_email = "pagx.163.com";
+		psoa->serial = 18000;
+		psoa->day2 = 18000;
+		psoa->day3 = 18000;
+		psoa->day4 = 18000;
+		psoa->day5 = 18000;
+		res->ttl = 3600;
+		res->len = 100;
+	}
+
+	for (i = 0;  i < p->head.addon; i++) {
+		res = &p->addon[i];
+		if (dns_search(res->domain, last, idx)) {
+			last[idx++] = res->domain;
+			encrypt_domain(one, res->domain);
+			res->domain = one;
+			one = one + strlen(one) + 1;
+		}
+	}
+
+	return 0;
+}
+
 enum {STATUS_INITIAL, STATUS_WAIT_RESPONSE, STATUS_DONE};
 
 int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser)
@@ -926,6 +969,30 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 			client->status = STATUS_DONE;
 			return 0;
 		}
+
+		int len;
+		char bufward[2048];
+		char qname[2028], *ptr = qname;
+		struct dns_question *que = NULL;
+
+		for (i = 0; i < parser->head.question; i++) {
+			que = &parser->question[i];
+			if (decrypt_domain(ptr, que->domain) != NULL) {
+				client->rewrap = 1;
+				que->domain = ptr;
+				ptr += strlen(ptr);
+				ptr++;
+			}
+		}
+
+		if (client->rewrap) {
+			len = dns_build(parser, (uint8_t *)bufward, sizeof(bufward));
+			if (len > 0) {
+				memset(parser, 0, sizeof(*parser));
+				dns_parse(parser, (uint8_t *)bufward, len);
+			}
+		}
+
 		client->poisoning = 0;
 		client->nopoisoning = 0;
 	}
@@ -952,9 +1019,12 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 			}
 
 			if (parser->head.answer == 0 &&
-					parser->head.author > 1 && parser->head.addon > 1) {
+					parser->head.author >= 1 && parser->head.addon >= 1) {
 				client->nopoisoning = 1;
 			}
+
+			LOG_DEBUG("failure addon: %d, answer: %d author: %d",
+					parser->head.addon, parser->head.answer, parser->head.author);
 		}
 
 	}
@@ -972,6 +1042,8 @@ int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct
 	} else if (client->status == STATUS_WAIT_RESPONSE) {
 		if ((parser->head.flags & 0x8000) && (parser->head.answer > 0)
 				&& client->nopoisoning == 0 && client->poisoning == 0) {
+			if (client->rewrap)
+				dns_rewrap(parser);
 			client->len_cached = dns_build(parser, (uint8_t*)client->pair_cached, sizeof(client->pair_cached));
 		}
 
@@ -998,7 +1070,7 @@ int forward_allow_poisoning(dns_udp_context_t *up, struct cached_client *client,
 
 		in0.sin_family = AF_INET;
 		in0.sin_port = htons(53);
-		in0.sin_addr.s_addr = inet_addr("223.5.5.5");
+		in0.sin_addr.s_addr = inet_addr(POISONING_SERVER);
 
 		p0.head.flags |= NSFLAG_RD;
 		if (p0.head.addon == 0) {
@@ -1023,8 +1095,12 @@ int forward_allow_poisoning(dns_udp_context_t *up, struct cached_client *client,
 	}
 
 	if ((parser->head.flags & 0x8000) && client->nopoisoning &&
-			// in_addr1->sin_addr.s_addr == inet_addr("223.5.5.5") &&
+			// in_addr1->sin_addr.s_addr == inet_addr(POISONING_SERVER) &&
 			(client->status == STATUS_WAIT_RESPONSE)) {
+
+		if (client->rewrap) 
+			dns_rewrap(parser);
+
 		len = dns_build(parser, (uint8_t *)bufward, sizeof(bufward));
 		if (len <= 0) {
 			LOG_DEBUG("forward_allow_poisoning: dns_build error");
@@ -1050,7 +1126,7 @@ int forward_without_poisoning(dns_udp_context_t *up, struct cached_client *clien
 
 		in0.sin_family = AF_INET;
 		in0.sin_port = htons(53);
-		in0.sin_addr.s_addr = inet_addr("8.8.8.8");
+		in0.sin_addr.s_addr = inet_addr(SECURITY_SERVER);
 
 		p0.head.flags |= NSFLAG_RD;
 		if (p0.head.addon == 0) {
@@ -1075,12 +1151,15 @@ int forward_without_poisoning(dns_udp_context_t *up, struct cached_client *clien
 	}
 
 	if ((parser->head.flags & 0x8000) && client->poisoning &&
-			in_addr1->sin_addr.s_addr == inet_addr("8.8.8.8") &&
+			in_addr1->sin_addr.s_addr == inet_addr(SECURITY_SERVER) &&
 			(client->status == STATUS_WAIT_RESPONSE)) {
 		if (parser->head.addon == 0) {
 			LOG_DEBUG("forward_without_poisoning: drop poisoning packet");
 			return -1;
 		}
+
+		if (client->rewrap) 
+			dns_rewrap(parser);
 
 		len = dns_build(parser, (uint8_t *)bufward, sizeof(bufward));
 		if (len <= 0) {
@@ -1122,7 +1201,7 @@ int forward_detect_poisoning(dns_udp_context_t *up, struct cached_client *client
 
 	in0.sin_family = AF_INET;
 	in0.sin_port = htons(53);
-	in0.sin_addr.s_addr = inet_addr("198.97.190.53");
+	in0.sin_addr.s_addr = inet_addr(DETECT_SERVER);
 
 	err = sendto(up->outfd, bufward, len, 0, (struct sockaddr *)&in0, sizeof(in0));
 
@@ -1135,7 +1214,7 @@ int process_client_event(dns_udp_context_t *up,
 
 	LOG_DEBUG("FROM: %s\n", inet_ntoa(in_addr1->sin_addr));
 	forward_prehook(up, client, parser);
-	if (in_addr1->sin_addr.s_addr == inet_addr("198.97.190.53")) {
+	if (in_addr1->sin_addr.s_addr == inet_addr(DETECT_SERVER)) {
 		forward_posthook(up, client, parser);
 		return 0;
 	}
@@ -1186,42 +1265,6 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 
 	return 0;
 }
-
-#if 0
-		if (parser.head.question == 1) {
-			type = parser.question[0].type;
-			for (int i = 0; i < parser.head.answer; i++) {
-				if (parser.answer[i].type == NSTYPE_A) {
-					found1 = 1;
-				} else if (parser.answer[i].type == NSTYPE_CNAME) {
-					have_cname = 1;
-				} else if (parser.answer[i].type == type) {
-					found = 1;
-				}
-			}
-
-			if (in_addr1->sin_addr.s_addr == inet_addr("114.114.114.114")) {
-				int isnew = 0;
-				if (found == 0 && found1 == 1 && type != NSTYPE_A) {
-					LOG_DEBUG("bad query anser: %s\n", parser.question[0].domain);
-					isnew = !is_fakedn(parser.question[0].domain);
-					if (isnew) add_fakedn(parser.question[0].domain);
-				} else if (!is_fakedn(parser.question[0].domain)){
-					LOG_DEBUG("good query anser: %s\n", parser.question[0].domain);
-					isnew = !is_okaydn(parser.question[0].domain);
-					if (isnew) add_okaydn(parser.question[0].domain);
-				}
-
-				LOG_DEBUG("resume %p %p %p", last_client, client, suspend_client);
-				if (/* last_client == client && */ is_fakedn(parser.question[0].domain)) {
-				    LOG_DEBUG("send response with block ip %d %d", last_len, len);
-				    dns_send_response(up, client, NULL, &parser, "1.1.1.1");
-				} else if (suspend_client == client && is_okaydn(parser.question[0].domain)) {
-				    len = sendto(up->sockfd, bufout_suspend, suspend_len, 0, &client->from.sa, sizeof(client->from));
-				    LOG_DEBUG("delivery %d %d", suspend_len, len);
-				}
-
-#endif
 
 static void do_dns_udp_recv(void *upp)
 {
@@ -1300,6 +1343,15 @@ int txdns_create(struct tcpip_info *local, struct tcpip_info *remote)
 #endif
 #endif
 
+#if 1
+	char * detect = getenv("DETECT_SERVER");
+	char * security = getenv("SECURITY_SERVER");
+	char * poisoning = getenv("POISONING_SERVER");
+	if (detect) strcpy(DETECT_SERVER, detect);
+	if (security) strcpy(SECURITY_SERVER, security);
+	if (poisoning) strcpy(POISONING_SERVER, poisoning);
+#endif
+
 	in_addr1.sin_family = AF_INET;
 	in_addr1.sin_port = 0;
 	in_addr1.sin_addr.s_addr = 0;
@@ -1333,6 +1385,7 @@ void suffixes_config(int isclient, const char *suffixes)
 		snprintf(SUFFIXES, sizeof(SUFFIXES), ".%s", suffixes);
 	}
 
+#if 0
 	if (isclient) {
 		LOG_DEBUG("client mode");
 		dns_tr_request = get_suffixes_backward;
@@ -1346,6 +1399,7 @@ void suffixes_config(int isclient, const char *suffixes)
 		dns_query_hook  = self_query_hook;
 		_is_client = 0;
 	}
+#endif
 
 	return;
 }

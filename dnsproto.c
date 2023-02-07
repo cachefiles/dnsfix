@@ -291,6 +291,7 @@ uint8_t * dn_put_domain(uint8_t *buf, uint8_t *limit, const char *domain, uint8_
 	int ret;
 
 	if (buf < limit) {
+		domain = domain == NULL? "": domain;
 		ret = dn_comp(domain, buf, limit - buf, ptr, ptr + count);
 		if (ret > 0) {
 			return buf + ret;

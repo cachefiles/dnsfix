@@ -161,6 +161,8 @@ static struct cached_client {
 	int pair;
 	int len_cached;
 	char pair_cached[1400];
+	int len_cached1;
+	char pair_cached1[1400];
 
 	union {
 		struct sockaddr sa;
@@ -169,6 +171,10 @@ static struct cached_client {
 } __cached_client[4096];
 
 static int __last_index = 0;
+#define CACHED_CLIENT_FLAGS_DETECT_SERVER_ANSWER    0x4
+#define CACHED_CLIENT_FLAGS_SECURITY_SERVER_ANSWER  0x1
+#define CACHED_CLIENT_FLAGS_POISONING_SERVER_ANSWER 0x2
+#define CACHED_CLIENT_FLAGS_ALL_SERVER_ANSWER       0x7
 
 int add_domain(const char *name, unsigned int localip)
 {
@@ -547,7 +553,7 @@ int get_suffixes_backward(struct dns_parser *parser)
 		encrypt_domain(crypt, que->domain);
 
 		namptr = que->domain;
-		if ((0x8000 & parser->head.flags) || is_fakedn(que->domain)) {
+		if ((NSFLAG_QR & parser->head.flags) || is_fakedn(que->domain)) {
 			que->domain = add_domain(parser, crypt);
 		}
 
@@ -597,7 +603,7 @@ int get_suffixes_backward(struct dns_parser *parser)
 		parser->head.answer = total;
 
 	} else if ((parser->head.answer == 0)
-			&& (0x8000 & parser->head.flags)) {
+			&& (NSFLAG_QR & parser->head.flags)) {
 		parser->answer[0].domain = parser->question[0].domain;
 		parser->answer[0].klass  = parser->question[0].klass;
 		parser->answer[0].type   = NSTYPE_CNAME;
@@ -958,7 +964,7 @@ int dns_rewrap(struct dns_parser *p)
 
 enum {STATUS_INITIAL, STATUS_WAIT_RESPONSE, STATUS_DONE};
 
-int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser)
+int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser, const char *name)
 {
 	int atype, qtype, i;
 
@@ -970,11 +976,17 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 			return 0;
 		}
 
+		if (strcmp(parser->question[0].domain, SUFFIXES + 1) == 0) {
+			LOG_DEBUG("forward_prehook dns_send_response 1.1.1.1 xxx");
+			return 0;
+		}
+
 		int len;
-		char bufward[2048];
+		static char bufward[2048];
 		char qname[2028], *ptr = qname;
 		struct dns_question *que = NULL;
 
+		client->rewrap = 0;
 		for (i = 0; i < parser->head.question; i++) {
 			que = &parser->question[i];
 			if (decrypt_domain(ptr, que->domain) != NULL) {
@@ -997,7 +1009,7 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 		client->nopoisoning = 0;
 	}
 
-	if ((parser->head.flags & 0x8000) &&
+	if ((parser->head.flags & NSFLAG_QR) &&
 			(client->status == STATUS_WAIT_RESPONSE)) {
 
 		qtype = parser->question[0].type;
@@ -1008,7 +1020,7 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 			client->poisoning = 1;
 		}
 
-		if (parser->head.answer > 1) {
+		if (parser->head.answer > 1 && (atype != NSTYPE_A|| strcmp(name, POISONING_SERVER) == 0)) {
 			client->nopoisoning = 1;
 		} else if (!client->poisoning) {
 			for (i = 0; i < parser->head.answer; i++) {
@@ -1023,6 +1035,10 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 				client->nopoisoning = 1;
 			}
 
+#if 0
+			(in_addr1->sin_addr.s_addr == inet_addr(POISONING_SERVER))
+#endif
+
 			LOG_DEBUG("failure addon: %d, answer: %d author: %d",
 					parser->head.addon, parser->head.answer, parser->head.author);
 		}
@@ -1032,7 +1048,7 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 	return 0;
 }
 
-int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser)
+int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser, int which)
 {
 	int err, len;
 	char *bufward;
@@ -1040,20 +1056,32 @@ int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct
 	if (client->status == STATUS_INITIAL && parser->head.question > 0) {
 		client->status = STATUS_WAIT_RESPONSE;
 	} else if (client->status == STATUS_WAIT_RESPONSE) {
-		if ((parser->head.flags & 0x8000) && (parser->head.answer > 0)
+		if ((parser->head.flags & NSFLAG_QR) && (parser->head.answer > 0) && which >= 0
 				&& client->nopoisoning == 0 && client->poisoning == 0) {
-			if (client->rewrap)
-				dns_rewrap(parser);
-			client->len_cached = dns_build(parser, (uint8_t*)client->pair_cached, sizeof(client->pair_cached));
+			if (client->rewrap) dns_rewrap(parser);
+			switch (which) {
+				case 1:
+					client->len_cached = dns_build(parser, (uint8_t*)client->pair_cached, sizeof(client->pair_cached));
+					break;
+
+				case 0:
+					client->len_cached1 = dns_build(parser, (uint8_t*)client->pair_cached1, sizeof(client->pair_cached1));
+					break;
+			}
 		}
 
-		if (client->len_cached > 0 && client->nopoisoning) {
-			len = client->len_cached;
-			bufward = client->pair_cached;
+		if (client->len_cached > 0 && (client->nopoisoning || client->flags == CACHED_CLIENT_FLAGS_ALL_SERVER_ANSWER)) {
+			if (!client->nopoisoning) {
+				len = client->len_cached;
+				bufward = client->pair_cached;
+			} else {
+				len = client->len_cached1;
+				bufward = client->pair_cached1;
+			}
 			err = sendto(up->sockfd, bufward, len, 0, &client->from.sa, sizeof(client->from));
 			client->status = STATUS_DONE;
 		}
-		LOG_DEBUG("poisoning: %d nopoisoning: %d", client->poisoning, client->nopoisoning);
+		LOG_DEBUG("poisoning: %d nopoisoning: %d flags %x len %d", client->poisoning, client->nopoisoning, client->flags, client->len_cached);
 	}
 
 	return 0;
@@ -1063,6 +1091,7 @@ int forward_allow_poisoning(dns_udp_context_t *up, struct cached_client *client,
 {
 	int err, len;
 	char bufward[4096];
+	uint8_t optbuf[1024];
 	struct sockaddr_in in0;
 	struct dns_parser p0 = *parser;
 
@@ -1073,6 +1102,41 @@ int forward_allow_poisoning(dns_udp_context_t *up, struct cached_client *client,
 		in0.sin_addr.s_addr = inet_addr(POISONING_SERVER);
 
 		p0.head.flags |= NSFLAG_RD;
+
+		for (int i = 0; i < p0.head.addon; i++) {
+			struct dns_resource *res = &p0.addon[i];
+			if (res->type != NSTYPE_OPT) {
+				continue;
+			}
+
+			if (res->domain == NULL || strcmp(res->domain, "") == 0) {
+				size_t len = res->len;
+				int have_edns = 0;
+				const uint8_t * valp = *(const uint8_t **)res->value;
+				struct tagheader {uint16_t tag; uint16_t len; } tag0;
+
+				while (len > sizeof(tag0)) {
+					memcpy(&tag0, valp, sizeof(tag0));
+					if (len < sizeof(tag0) + htons(tag0.len)) break;
+					valp += sizeof(tag0) + htons(tag0.len);
+					len -= (sizeof(tag0) + htons(tag0.len));
+LOG_DEBUG("tag: %x", tag0.tag);
+					if (tag0.tag == htons(0x0008)) {
+						have_edns = 1;
+						break;
+					}
+				}
+
+				if (have_edns == 0) {
+					const uint8_t * valp = *(const uint8_t **)res->value;
+					memcpy(optbuf, valp, res->len);
+					memcpy(optbuf + res->len, "\x00\x08\x00\x06\x00\x01\x10\x00\x6e\x2a", 10);
+					*(void **)res->value = optbuf;
+					res->len += 10;
+				}
+			}
+		}
+
 		if (p0.head.addon == 0) {
 			p0.head.addon = 1;
 			p0.addon[0].domain = "";
@@ -1092,9 +1156,13 @@ int forward_allow_poisoning(dns_udp_context_t *up, struct cached_client *client,
 		}
 
 		err = sendto(up->outfd, bufward, len, 0, (struct sockaddr *)&in0, sizeof(in0));
+		return 0;
 	}
 
-	if ((parser->head.flags & 0x8000) && client->nopoisoning &&
+	if (inet_addr(SECURITY_SERVER) == in_addr1->sin_addr.s_addr)
+		client->flags |= CACHED_CLIENT_FLAGS_SECURITY_SERVER_ANSWER;
+
+	if ((parser->head.flags & NSFLAG_QR) && client->nopoisoning &&
 			// in_addr1->sin_addr.s_addr == inet_addr(POISONING_SERVER) &&
 			(client->status == STATUS_WAIT_RESPONSE)) {
 
@@ -1119,6 +1187,7 @@ int forward_without_poisoning(dns_udp_context_t *up, struct cached_client *clien
 {
 	int err, len;
 	char bufward[4096];
+	uint8_t optbuf[1024];
 	struct sockaddr_in in0;
 	struct dns_parser p0 = *parser;
 
@@ -1129,6 +1198,40 @@ int forward_without_poisoning(dns_udp_context_t *up, struct cached_client *clien
 		in0.sin_addr.s_addr = inet_addr(SECURITY_SERVER);
 
 		p0.head.flags |= NSFLAG_RD;
+
+		for (int i = 0; i < p0.head.addon; i++) {
+			struct dns_resource *res = &p0.addon[i];
+			if (res->type != NSTYPE_OPT) {
+				continue;
+			}
+
+			if (res->domain == NULL || strcmp(res->domain, "") == 0) {
+				size_t len = res->len;
+				int have_edns = 0;
+				const uint8_t * valp = *(const uint8_t **)res->value;
+				struct tagheader {uint16_t tag; uint16_t len; } tag0;
+
+				while (len > sizeof(tag0)) {
+					memcpy(&tag0, valp, sizeof(tag0));
+					if (len < sizeof(tag0) + htons(tag0.len)) break;
+					valp += sizeof(tag0) + htons(tag0.len);
+					len -= (sizeof(tag0) + htons(tag0.len));
+					if (tag0.tag == htons(0x0008)) {
+						have_edns = 1;
+						break;
+					}
+				}
+
+				if (have_edns == 0) {
+					const uint8_t * valp = *(const uint8_t **)res->value;
+					memcpy(optbuf, valp, res->len);
+					memcpy(optbuf + res->len, "\x00\x08\x00\x06\x00\x01\x10\x00\x6e\x2a", 10);
+					*(void **)res->value = optbuf;
+					res->len += 10;
+				}
+			}
+		}
+
 		if (p0.head.addon == 0) {
 			p0.head.addon = 1;
 			p0.addon[0].domain = "";
@@ -1148,9 +1251,13 @@ int forward_without_poisoning(dns_udp_context_t *up, struct cached_client *clien
 		}
 
 		err = sendto(up->outfd, bufward, len, 0, (struct sockaddr *)&in0, sizeof(in0));
+		return 0;
 	}
 
-	if ((parser->head.flags & 0x8000) && client->poisoning &&
+	if (inet_addr(POISONING_SERVER) == in_addr1->sin_addr.s_addr)
+		client->flags |= CACHED_CLIENT_FLAGS_POISONING_SERVER_ANSWER;
+
+	if ((parser->head.flags & NSFLAG_QR) && client->poisoning &&
 			in_addr1->sin_addr.s_addr == inet_addr(SECURITY_SERVER) &&
 			(client->status == STATUS_WAIT_RESPONSE)) {
 		if (parser->head.addon == 0) {
@@ -1175,7 +1282,7 @@ int forward_without_poisoning(dns_udp_context_t *up, struct cached_client *clien
 	return 0;
 }
 
-int forward_detect_poisoning(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser)
+int forward_detect_poisoning(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser, struct sockaddr_in *from)
 {
 	int err, len;
 	char bufward[4096];
@@ -1184,10 +1291,12 @@ int forward_detect_poisoning(dns_udp_context_t *up, struct cached_client *client
 	struct dns_parser p0 = *parser;
 
 	if (client->status != STATUS_INITIAL || parser->head.question == 0) {
+		if (inet_addr(DETECT_SERVER) == from->sin_addr.s_addr) client->flags |= CACHED_CLIENT_FLAGS_DETECT_SERVER_ANSWER;
 		return 0;
 	}
 
 	p0.head.flags &= ~NSFLAG_RD;
+	p0.head.flags &= ~NSFLAG_ZERO;
 	for (int i = 0; i < p0.head.question; i++) {
 		que = &p0.question[i];
 		que->type = (que->type == NSTYPE_MX? NSTYPE_SRV: NSTYPE_MX);
@@ -1212,16 +1321,17 @@ int process_client_event(dns_udp_context_t *up,
 		struct cached_client *client, struct dns_parser *parser, struct sockaddr_in *in_addr1, socklen_t namlen)
 {
 
-	LOG_DEBUG("FROM: %s\n", inet_ntoa(in_addr1->sin_addr));
-	forward_prehook(up, client, parser);
+	LOG_DEBUG("FROM: %s: %s\n", inet_ntoa(in_addr1->sin_addr), parser->question[0].domain);
+	forward_prehook(up, client, parser, inet_ntoa(in_addr1->sin_addr));
 	if (in_addr1->sin_addr.s_addr == inet_addr(DETECT_SERVER)) {
-		forward_posthook(up, client, parser);
+		client->flags |= CACHED_CLIENT_FLAGS_DETECT_SERVER_ANSWER;
+		forward_posthook(up, client, parser, -1);
 		return 0;
 	}
 	forward_allow_poisoning(up, client, parser, in_addr1);
 	forward_without_poisoning(up, client, parser, in_addr1);
-	forward_detect_poisoning(up, client, parser);
-	forward_posthook(up, client, parser);
+	forward_detect_poisoning(up, client, parser, in_addr1);
+	forward_posthook(up, client, parser, inet_addr(SECURITY_SERVER) == in_addr1->sin_addr.s_addr);
 
 	return 0;
 }
@@ -1242,7 +1352,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 	}
 
 	int index = (__last_index & 0xFFF);
-	if (parser.head.flags & 0x8000) {
+	if (parser.head.flags & NSFLAG_QR) {
 		int ident = parser.head.ident;
 		client = &__cached_client[ident & 0xFFF];
 
@@ -1254,6 +1364,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 		parser.head.ident = client->l_ident;
 	} else {
 		client = &__cached_client[index];
+		memset(client, 0, sizeof(*client));
 		memcpy(&client->from, in_addr1, namlen);
 		client->l_ident = (parser.head.ident);
 		client->r_ident = (rand() & 0xF000) | index;

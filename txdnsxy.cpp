@@ -161,8 +161,8 @@ static struct cached_client {
 	int pair;
 	int len_cached;
 	char pair_cached[1400];
-	int len_cached1;
-	char pair_cached1[1400];
+	int len_nopoisoning;
+	char hold_nopoisoning[1400];
 
 	union {
 		struct sockaddr sa;
@@ -1065,7 +1065,7 @@ int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct
 					break;
 
 				case 0:
-					client->len_cached1 = dns_build(parser, (uint8_t*)client->pair_cached1, sizeof(client->pair_cached1));
+					client->len_nopoisoning = dns_build(parser, (uint8_t*)client->hold_nopoisoning, sizeof(client->hold_nopoisoning));
 					break;
 			}
 		}
@@ -1075,8 +1075,8 @@ int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct
 				len = client->len_cached;
 				bufward = client->pair_cached;
 			} else {
-				len = client->len_cached1;
-				bufward = client->pair_cached1;
+				len = client->len_nopoisoning;
+				bufward = client->hold_nopoisoning;
 			}
 			err = sendto(up->sockfd, bufward, len, 0, &client->from.sa, sizeof(client->from));
 			client->status = STATUS_DONE;
@@ -1165,6 +1165,14 @@ LOG_DEBUG("tag: %x", tag0.tag);
 	if ((parser->head.flags & NSFLAG_QR) && client->nopoisoning &&
 			// in_addr1->sin_addr.s_addr == inet_addr(POISONING_SERVER) &&
 			(client->status == STATUS_WAIT_RESPONSE)) {
+
+		if (client->len_nopoisoning) {
+			char *p = client->hold_nopoisoning;
+			len = client->len_nopoisoning;
+			err = sendto(up->sockfd, p, len, 0, &client->from.sa, sizeof(client->from));
+			client->status = STATUS_DONE;
+			return -1;
+		}
 
 		if (client->rewrap) 
 			dns_rewrap(parser);

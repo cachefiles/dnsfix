@@ -1048,7 +1048,7 @@ int forward_prehook(dns_udp_context_t *up, struct cached_client *client, struct 
 	return 0;
 }
 
-int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser, int which)
+int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct dns_parser *parser, int select_security)
 {
 	int err, len;
 	char *bufward;
@@ -1056,10 +1056,10 @@ int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct
 	if (client->status == STATUS_INITIAL && parser->head.question > 0) {
 		client->status = STATUS_WAIT_RESPONSE;
 	} else if (client->status == STATUS_WAIT_RESPONSE) {
-		if ((parser->head.flags & NSFLAG_QR) && (parser->head.answer > 0) && which >= 0
+		if ((parser->head.flags & NSFLAG_QR) && (parser->head.answer > 0) && select_security >= 0
 				&& client->nopoisoning == 0 && client->poisoning == 0) {
 			if (client->rewrap) dns_rewrap(parser);
-			switch (which) {
+			switch (select_security) {
 				case 1:
 					client->len_cached = dns_build(parser, (uint8_t*)client->pair_cached, sizeof(client->pair_cached));
 					break;
@@ -1070,13 +1070,14 @@ int forward_posthook(dns_udp_context_t *up, struct cached_client *client, struct
 			}
 		}
 
-		if (client->len_cached > 0 && (client->nopoisoning || client->flags == CACHED_CLIENT_FLAGS_ALL_SERVER_ANSWER)) {
-			if (!client->nopoisoning) {
-				len = client->len_cached;
-				bufward = client->pair_cached;
-			} else {
+		if (client->len_cached + client->len_nopoisoning > 0 &&
+				(client->nopoisoning || client->flags == CACHED_CLIENT_FLAGS_ALL_SERVER_ANSWER)) {
+			if (client->nopoisoning || client->len_cached == 0) {
 				len = client->len_nopoisoning;
 				bufward = client->hold_nopoisoning;
+			} else {
+				len = client->len_cached;
+				bufward = client->pair_cached;
 			}
 			err = sendto(up->sockfd, bufward, len, 0, &client->from.sa, sizeof(client->from));
 			client->status = STATUS_DONE;
@@ -1171,6 +1172,11 @@ LOG_DEBUG("tag: %x", tag0.tag);
 			len = client->len_nopoisoning;
 			err = sendto(up->sockfd, p, len, 0, &client->from.sa, sizeof(client->from));
 			client->status = STATUS_DONE;
+			return -1;
+		}
+
+		if (in_addr1->sin_addr.s_addr != inet_addr(POISONING_SERVER)) {
+			LOG_DEBUG("wait for more response");
 			return -1;
 		}
 

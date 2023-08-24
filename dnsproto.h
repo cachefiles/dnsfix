@@ -12,6 +12,7 @@
 #define NSTYPE_SRV  33
 #define NSTYPE_DNAME 39
 #define NSTYPE_OPT  41
+#define NSTYPE_DS  43
 #define NSTYPE_RRSIG  46
 #define NSTYPE_NSEC   47
 #define NSTYPE_NSEC3  50
@@ -31,6 +32,7 @@
 #define NSSIG_NSEC3 "B"
 #define NSSIG_RRSIG "B"
 #define NSSIG_OPT   "B"
+#define NSSIG_DS   "B"
 // #define NSSIG_HTTPS "qsqqs"
 #define NSSIG_HTTPS "B"
 

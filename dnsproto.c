@@ -48,10 +48,16 @@ static const char * rsrc_verify_signature[256] = {
 	[NSTYPE_CNAME] = NSSIG_CNAME,
 	[NSTYPE_SOA] = NSSIG_SOA,
 	[NSTYPE_PTR] = NSSIG_PTR,
-	[NSTYPE_MX] = NSSIG_MX,
+	[NSTYPE_MX]  = NSSIG_MX,
+	[NSTYPE_TXT] = NSSIG_TXT,
 	[NSTYPE_AAAA] = NSSIG_AAAA,
 	[NSTYPE_SRV] = NSSIG_SRV,
+	[NSTYPE_DNAME] = NSSIG_DNAME,
 	[NSTYPE_OPT] = NSSIG_OPT,
+	[NSTYPE_RRSIG] = NSSIG_RRSIG,
+	[NSTYPE_NSEC] = NSSIG_NSEC,
+	[NSTYPE_NSEC3] = NSSIG_NSEC3,
+	[NSTYPE_HTTPS] = NSSIG_HTTPS,
 };
 
 #define ARRAY_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
@@ -135,6 +141,18 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 					dopt += 2;
 					break;
 
+				case 'S':
+					valptr += sizeof(char *);
+					assert(valptr < vallimit);
+
+					len = *dopt++;
+                                        snprintf(dn, len + 1, "%s", dopt);
+					if (len > 0 && (dnp = add_domain(parse, dn))) {
+						memcpy(btr, &dnp, sizeof(dnp));
+						dopt += len;
+						break;
+					}
+
 				case 's':
 					valptr += sizeof(char *);
 					assert(valptr < vallimit);
@@ -155,6 +173,7 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 		}
 	}
 
+	fprintf(stderr, "unkown resource type: %d\n", res->type);
 	return &frame[msglen];
 }
 
@@ -195,7 +214,7 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 				parser->head.author, parser->head.addon); 
 		return NULL;
 	}
-		
+
 	for (num = 0; dotp < limit && num < parser->head.question; num ++)  {
 		nsq = &parser->question[num];
 		complen = dn_expand(frame, limit, dotp, dn, sizeof(dn));
@@ -277,9 +296,15 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 
 		dotp = rsc_verify_handle(res, parser, dotp, frame, len);
 		dotp += f0.len;
+
 	}
 
 	if (dotp > limit) {
+#if 0
+		uint8_t *test = (uint8_t*)frame;
+		for (int i = 0; i < len; i++)
+		    fprintf(stderr, (i&0xf)? "%02x ": "\n%02x ", test[i]);
+#endif
 		return NULL;
 	}
 
@@ -326,6 +351,7 @@ uint8_t * dn_put_long(uint8_t *buf, uint8_t *limit, uint32_t val)
 uint8_t * dn_put_resource(uint8_t *dotp, uint8_t *limit, const struct dns_resource *res, struct dns_parser *parse)
 {
 	int ret;
+        int len;
 	uint8_t *mark = NULL;
 
 	if (res->type < 256 && rsrc_verify_signature[res->type]) {
@@ -370,6 +396,17 @@ uint8_t * dn_put_resource(uint8_t *dotp, uint8_t *limit, const struct dns_resour
 					NTOH_PTR_SET(dotp, &drvp->u16, uint16_t);
 					right_val += 2;
 					dotp += 2;
+					break;
+
+				case 'S':
+					len = strlen(drvp->str);
+					if (len < 256 && dotp + len + 4 < limit) {
+					    right_val += sizeof(void *);
+					    *dotp++ = strlen(drvp->str);
+					    memcpy(dotp, drvp->str, len);
+					    dotp += len;
+					    break;
+					}
 					break;
 
 				case 's':

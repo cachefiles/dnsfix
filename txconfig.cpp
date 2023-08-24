@@ -175,7 +175,7 @@ static void handle_domain(char *line)
 
 	addr = inet_addr(p);
 	fprintf(stderr, "domain %s %x\n", domain, addr);
-	add_domain(domain, addr);
+	// add_domain(domain, addr);
 	return;
 }
 

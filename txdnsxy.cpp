@@ -92,6 +92,45 @@ rcode: 4;
 #define RCODE_REFUSED  5
 #define NSCLASS_INET 0x01
 
+#define SOA_INDEX 0
+#define NS_INDEX  1
+
+struct dns_resource _predefine_resource_record[] = {
+	{
+		.type = NSTYPE_SOA,
+		.klass = NSCLASS_INET,
+		.ttl = 86400,
+		.len = 4,
+		.flags = 0,
+		.domain = "",
+		.value = {110, 42, 145, 164}},
+	{
+		.type = NSTYPE_NS,
+		.klass = NSCLASS_INET,
+		.ttl = 86400,
+		.len = 4,
+		.flags = 0,
+		.domain = "",
+		.value = {110, 42, 145, 164}},
+	{
+		.type = NSTYPE_A,
+		.klass = NSCLASS_INET,
+		.ttl = 36000,
+		.len = 4,
+		.flags = 0,
+		.domain = "mtalk.google.com",
+		.value = {110, 42, 145, 164}},
+	{
+		.type = NSTYPE_A,
+		.klass = NSCLASS_INET,
+		.ttl = 36000,
+		.len = 4,
+		.flags = 0,
+		.domain = "alt1-mtalk.google.com",
+		.value = {110, 42, 145, 164}},
+};
+
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof(*array))
 int __unmap_code(int c)
 {
 	int cc = (c & 0xFF);
@@ -156,7 +195,7 @@ void domain_wrap(char *dst, const char *src, const char *suffixies)
 		s++;
 	}
 
-	strcpy(d, suffixies);
+	strcpy(d, suffixies + ((d == dst) && '.' == *suffixies));
 	return;
 }
 
@@ -711,7 +750,7 @@ int dns_search(const char *domain, const char *list[], int count)
 
 int dns_unwrap(struct dns_parser *p)
 {
-	int i, soa_fixed = -1, idx = 0;
+	int i, idx = 0;
 	char one[256];
 	const char *last[56] = {};
 	struct dns_question *que = NULL;
@@ -750,9 +789,13 @@ int dns_unwrap(struct dns_parser *p)
 	for (i = 0;  i < p->head.author; i++) {
 		res = &p->author[i];
 		if (res->type == NSTYPE_SOA) {
-			p->author[0] = *res;
-			soa_fixed = 1;
-			break;
+			res->domain = "";
+			psoa = (struct dns_soa *)res->value;
+
+			*psoa = _rr_soa;
+			res->ttl = 3600;
+			res->len = sizeof(*psoa);
+			continue;
 		}
 
 		if (dns_search(res->domain, last, idx)) {
@@ -760,22 +803,6 @@ int dns_unwrap(struct dns_parser *p)
 			domain_unwrap(one, res->domain, NULL);
 			res->domain = add_domain(p, one);
 		}
-	}
-
-	if (soa_fixed) {
-		res = &p->author[0];
-		res->domain = ".";
-		psoa = (struct dns_soa *)res->value;
-
-		psoa->name_server = "one.cachefiles.net";
-		psoa->admin_email = "pagx.163.com";
-		psoa->serial = 18000;
-		psoa->day2 = 18000;
-		psoa->day3 = 18000;
-		psoa->day4 = 18000;
-		psoa->day5 = 18000;
-		res->ttl = 3600;
-		res->len = 100;
 	}
 
 	for (i = 0;  i < p->head.addon; i++) {
@@ -793,7 +820,7 @@ int dns_unwrap(struct dns_parser *p)
 
 int dns_rewrap(struct dns_parser *p, const char *suffixies)
 {
-	int i, soa_fixed = -1, idx = 0;
+	int i, idx = 0;
 	const char *last[56] = {};
 	char qname[2028];
 	struct dns_question *que = NULL;
@@ -830,14 +857,24 @@ int dns_rewrap(struct dns_parser *p, const char *suffixies)
 
 	for (i = 0;  i < p->head.author; i++) {
 		res = &p->author[i];
-		if (res->type == NSTYPE_SOA) {
-			soa_fixed = authorn++;
-		}
 
 		if (res->type == NSTYPE_NSEC ||
 				res->type == NSTYPE_NSEC3 ||
 				res->type == NSTYPE_RRSIG) {
 			continue;
+		}
+
+		if (res->type == NSTYPE_SOA) {
+			psoa = (struct dns_soa *)res->value;
+
+			domain_wrap(qname, res->domain, suffixies);
+			res->domain = add_domain(p, qname);
+
+			psoa->name_server = _rr_soa.name_server;
+			res->len = sizeof(*psoa);
+
+#define NSFLAG_MERGED (NSFLAG_RD| NSFLAG_AA| NSFLAG_QR)
+			p->head.flags = (p->head.flags & RCODE_NXDOMAIN) | NSFLAG_MERGED;
 		}
 
 		p->author[authorn++] = *res;
@@ -848,18 +885,6 @@ int dns_rewrap(struct dns_parser *p, const char *suffixies)
 		}
 	}
 	p->head.author = authorn;
-
-	if (soa_fixed > 0) {
-		res = &p->author[soa_fixed];
-		res->domain = SUFFIXES + 1;
-		psoa = (struct dns_soa *)res->value;
-
-		*psoa = _rr_soa;
-		res->len = sizeof(*psoa);
-
-#define NSFLAG_MERGED (NSFLAG_RD| NSFLAG_AA| NSFLAG_QR)
-		p->head.flags = (p->head.flags & RCODE_NXDOMAIN) | NSFLAG_MERGED;
-	}
 
 	for (i = 0;  i < p->head.addon; i++) {
 		res = &p->addon[i];
@@ -954,6 +979,37 @@ static int add_client_subnet(struct cached_client *client, struct dns_parser &p0
 	return 0;
 }
 
+int disallow_cname_resource_record(struct dns_parser *parser)
+{
+	struct dns_resource *res;
+	struct dns_question *que = &parser->question[0];
+
+	for (int i = 0; i < ARRAY_SIZE(_predefine_resource_record); i++) {
+		res = &_predefine_resource_record[i];
+		if (strcasecmp(res->domain, que->domain) == 0) {
+			goto remove_cname;
+		}
+	}
+
+	return 0;
+
+remove_cname:
+
+	int answer = 0;
+	for (int i = 0; i < parser->head.answer; i++) {
+		res = &parser->answer[i];
+		if (res->type == NSTYPE_CNAME) {
+			continue;
+		}
+
+		res->domain = que->domain;
+		parser->answer[answer++] = *res;
+	}
+
+	parser->head.answer = answer;
+
+	return 0;
+}
 
 int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src, uint8_t *buf)
 {
@@ -980,10 +1036,18 @@ int setup_forwarder(struct cached_client *client, int index, struct sockaddr_in 
 #define FLAG_TRUSTED     (1 << 3)
 #define FLAG_UNTRUST     (1 << 4)
 
-struct cached_client * client_next(struct cached_client *client, int ident) 
+struct cached_client * client_next(struct cached_client *client) 
 {
+	int ident;
+
+	if (client < __cached_client || client >= __cached_client + 0xFFF) {
+		return NULL;
+	}
+
+	assert(client != NULL);
 	int index = client - __cached_client;
 
+	ident = client->l_ident;
 	client = &__cached_client[++index & 0xFFF];
 	if (client->l_ident == ident) {
 		return client;
@@ -1015,13 +1079,13 @@ void checker_callback(struct cached_client *client, dns_udp_context_t *up)
 
 		int flags = client->flags & (FLAG_UNTRUST| FLAG_TRUSTED);
 
-		client = client_next(client, client->l_ident);
+		client = client_next(client);
 		if (client != NULL) {
 			client->flags |= flags;
 			client->callback(client, up);
 		}
 
-		client = client_next(client, client->l_ident);
+		client = client_next(client);
 		if (client != NULL) {
 			client->flags |= flags;
 			client->callback(client, up);
@@ -1039,8 +1103,7 @@ void checker_callback(struct cached_client *client, dns_udp_context_t *up)
 
 	uint8_t bufward[2048];
 	struct sockaddr_in in0;
-	size_t len;
-	int err;
+	int err, len;
 
 	in0.sin_family = AF_INET;
 	in0.sin_port = htons(53);
@@ -1057,7 +1120,7 @@ void checker_callback(struct cached_client *client, dns_udp_context_t *up)
 
 	len = dns_build(parser, bufward, sizeof(bufward));
 	if (len <= 0) {
-		LOG_DEBUG("checker_callback: dns_build error");
+		LOG_DEBUG("%x checker_callback: dns_build error", client->l_ident);
 		return;
 	}
 
@@ -1084,7 +1147,7 @@ void untrust_callback(struct cached_client *client, dns_udp_context_t *up)
 				(htons(parser->head.flags) &  NSFLAG_RCODE) == RCODE_SERVFAIL &&
 				parser->head.answer == 0 &&
 				parser->head.addon == 1) {
-			LOG_DEBUG("%04x - add_localdn %s\n", client->l_ident, parser->question[0].domain);
+			LOG_DEBUG("%x - add_localdn %s\n", client->l_ident, parser->question[0].domain);
 			if (!is_localdn(last2dot(parser->question[0].domain)))
 				add_localdn(last2dot(parser->question[0].domain));
 		}
@@ -1110,21 +1173,22 @@ void untrust_callback(struct cached_client *client, dns_udp_context_t *up)
 			}
 		}
 
+		disallow_cname_resource_record(parser);
 		inject_dns_record(parser, client->ecs_mode);
 
 		if ((client->flags & FLAG_TRUSTED) && !is_oversea(parser)) {
-			LOG_DEBUG("%x send untrust response");
+			LOG_DEBUG("%x send untrust response", client->l_ident);
 		} else if ((client->flags & FLAG_UNTRUST) || is_oversea(parser)) {
-			LOG_DEBUG("%x send trust response");
+			LOG_DEBUG("%x send trust response", client->l_ident);
 			client->flags |= FLAG_DONE;
-			client = client_next(client, client->l_ident);
+			client = client_next(client);
 			if (client != NULL) {
 				client->flags |= FLAG_UNTRUST;
 				client->callback(client, up);
 			}
 			return;
 		} else {
-			LOG_DEBUG("%x waiting for checker\n");
+			LOG_DEBUG("%x waiting for checker", client->l_ident);
 			return;
 		}
 
@@ -1132,7 +1196,7 @@ void untrust_callback(struct cached_client *client, dns_udp_context_t *up)
 
 		int err;
 		uint8_t bufward[2048];
-		size_t len = dns_build(parser, bufward, sizeof(bufward));
+		int len = dns_build(parser, bufward, sizeof(bufward));
 
 		if (len <= 0) {
 			LOG_DEBUG("%x forward_without_poisoning: dns_build error", client->l_ident);
@@ -1141,7 +1205,7 @@ void untrust_callback(struct cached_client *client, dns_udp_context_t *up)
 
 		update_route_table(parser);
 		err = sendto(up->sockfd, bufward, len, 0, &client->from.sa, sizeof(client->from));
-		(void)err;
+        LOG_DEBUG("%x send response %d %d %s", client->l_ident, err, len, strerror(errno));
 		client->flags |= FLAG_DONE;
 		return;
 	} else if (client->flags & FLAG_SENTOUT) {
@@ -1153,7 +1217,7 @@ void untrust_callback(struct cached_client *client, dns_udp_context_t *up)
 
 	uint8_t bufward[2048], optbuf[64];
 	struct sockaddr_in in0;
-	size_t len;
+	int len;
 	int err;
 
 	in0.sin_family = AF_INET;
@@ -1171,7 +1235,7 @@ void untrust_callback(struct cached_client *client, dns_udp_context_t *up)
 
 	len = dns_build(parser, bufward, sizeof(bufward));
 	if (len <= 0) {
-		LOG_DEBUG("checker_callback: dns_build error");
+		LOG_DEBUG("%x checker_callback: dns_build error", client->l_ident);
 		return;
 	}
 
@@ -1191,19 +1255,20 @@ void mytrust_callback(struct cached_client *client, dns_udp_context_t *up)
 	} else if (client->flags & FLAG_RECEIVE) {
 
 		if (client->flags & FLAG_UNTRUST) {
-			LOG_DEBUG("%x send mytrust response");
+			LOG_DEBUG("%x send mytrust response", client->l_ident);
 		} else {
-			LOG_DEBUG("%x waiting for checker\n");
+			LOG_DEBUG("%x waiting for checker", client->l_ident);
 			return;
 		}
 
+		disallow_cname_resource_record(parser);
 		inject_dns_record(parser, client->ecs_mode);
 		if (_is_client) dns_unwrap(parser);
 
-		int err;
+		int err, len;
 		uint8_t bufward[2048];
 		if (client->rewrap) dns_rewrap(parser, client->suffixies);
-		size_t len = dns_build(parser, bufward, sizeof(bufward));
+		len = dns_build(parser, bufward, sizeof(bufward));
 
 		if (len <= 0) {
 			LOG_DEBUG("%x forward_without_poisoning: dns_build error", client->l_ident);
@@ -1212,7 +1277,7 @@ void mytrust_callback(struct cached_client *client, dns_udp_context_t *up)
 
 		update_route_table(parser);
 		err = sendto(up->sockfd, bufward, len, 0, &client->from.sa, sizeof(client->from));
-		(void)err;
+        LOG_DEBUG("%x send response %d %d %s", client->l_ident, err, len, strerror(errno));
 		client->flags |= FLAG_DONE;
 		return;
 	} else if (client->flags & FLAG_SENTOUT) {
@@ -1239,12 +1304,74 @@ void mytrust_callback(struct cached_client *client, dns_udp_context_t *up)
 
 	len = dns_build(parser, bufward, sizeof(bufward));
 	if (len <= 0) {
-		LOG_DEBUG("checker_callback: dns_build error");
+		LOG_DEBUG("%x checker_callback: dns_build error", client->l_ident);
 		return;
 	}
 
 	err = sendto(up->outfd, bufward, len, 0, (struct sockaddr *)&in0, sizeof(in0));
 	(void)err;
+}
+
+int fetch_predefine_resource_record(struct dns_parser *parser)
+{
+	struct dns_resource *res;
+	struct dns_question *que = &parser->question[0];
+	size_t domain_plen = strlen(que->domain);
+
+	for (int i = 0; i < ARRAY_SIZE(_predefine_resource_record); i++) {
+
+		if (MAX_RECORD_COUNT <= parser->head.answer) {
+			break;
+		}
+
+		res = &_predefine_resource_record[i];
+		if ((res->type == que->type) && strcasecmp(res->domain, que->domain) == 0) {
+			int index = parser->head.answer++;
+			parser->answer[index].type = res->type;
+			parser->answer[index].klass = res->klass;
+			parser->answer[index].flags = res->flags;
+			parser->answer[index].ttl   = res->ttl;
+			memcpy(parser->answer[index].value, res->value, res->len);
+			parser->answer[index].domain = add_domain(parser, que->domain);
+		}
+	}
+
+	if (_is_client == 0 && SUFFIXES_LEN > 0 && strcasecmp(que->domain, SUFFIXES + 1) == 0) {
+		parser->head.flags |= (NSFLAG_QR| NSFLAG_AA);
+		if (que->type == NSTYPE_SOA) {
+			parser->head.author = 1;
+			res = &parser->author[0];
+
+			res->domain = que->domain;
+			res->klass = que->klass;
+			res->ttl  = 86400;
+			res->type = NSTYPE_NS;
+
+			struct dns_cname* cname = (struct dns_cname *)res->value;
+			cname->alias = _rr_soa.name_server;
+		}
+
+		return 1;
+	} else if (SUFFIXES_LEN > 2 && _is_client == 0 &&
+			(domain_plen < SUFFIXES_LEN || strcasecmp(que->domain + domain_plen - SUFFIXES_LEN, SUFFIXES))) {
+		parser->head.flags &= NSFLAG_RCODE;
+		parser->head.flags |= (RCODE_REFUSED| NSFLAG_QR);
+
+		parser->head.addon = 1;
+		res = &parser->addon[0];
+		res->domain = que->domain;
+		res->klass = que->klass;
+		res->type = NSTYPE_CNAME;
+		res->ttl  = 86400;
+
+		char tmpbuf[256];
+		struct dns_cname* cname = (struct dns_cname *)res->value;
+		domain_wrap(tmpbuf, que->domain, "");
+		cname->alias = add_domain(parser, tmpbuf);
+		return 1;
+	}
+
+	return (parser->head.answer > 0);
 }
 
 int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_in *in_addr1, socklen_t namlen, int fakeresp)
@@ -1258,121 +1385,24 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 
 	struct dns_parser parser, *pparse;
 	pparse = dns_parse(&parser, (uint8_t *)buf, count);
-	if (pparse == NULL) {
+	if (pparse == NULL || parser.head.question == 0) {
 		LOG_DEBUG("FROM: %s dns_forward dns_parse failure", inet_ntoa(in_addr1->sin_addr));
 		return -1;
 	}
-
-	LOG_DEBUG("%x FROM: %s: %s\n", parser.head.ident, inet_ntoa(in_addr1->sin_addr), parser.question[0].domain);
 
 #if 0
 	if (strcmp(parser.question[0].domain, SUFFIXES + 1) == 0) {
 		LOG_DEBUG("%p forward_prehook dns_send_response 1.1.1.1 xxx", client);
 		return 0;
 	}
-
-	if ((~parser.head.flags & NSFLAG_QR) && strstr(parser.question[0].domain, "mtalk.google.com")) {
-		unsigned char tmpbuf[2048];
-		parser.head.flags |= (NSFLAG_QR| NSFLAG_RA);
-		parser.head.answer = 1;
-		parser.answer[0].domain = parser.question[0].domain;
-		parser.answer[0].klass = parser.question[0].klass;
-		parser.answer[0].type = NSTYPE_A;
-		parser.answer[0].ttl  = 36000;
-		parser.answer[0].len  = 100;
-
-		u_long self = inet_addr("110.42.145.164");
-		memcpy(parser.answer[0].value,  &self, sizeof(self));
-
-		size_t len = dns_build(&parser, tmpbuf, sizeof(tmpbuf));
-		int err = sendto(up->sockfd, tmpbuf, len, 0, (struct sockaddr *)in_addr1, namlen);
-		LOG_DEBUG("mtalk.google.com fake response: %d %d %d %d", err, errno, namlen, len);
-		return 0;
-	}
 #endif
 
-	size_t domain_plen = strlen(parser.question[0].domain);
-
-	if ((parser.head.flags & NSFLAG_QR) == 0 && _is_client == 0 &&
-			SUFFIXES_LEN > 0 && strcasecmp(parser.question[0].domain, SUFFIXES + 1) == 0) {
-		struct dns_resource * res = &parser.author[0];
-		struct dns_soa *psoa = NULL;
-
-		res->domain = parser.question[0].domain;
-		res->klass = parser.question[0].klass;
-		res->type = NSTYPE_SOA;
-		res->ttl = 60;
-		res->len = sizeof(*psoa);
-
-		psoa = (struct dns_soa *)res->value;
-		*psoa = _rr_soa;
-
-		LOG_DEBUG("%04x forward_prehook %x %d", parser.head.ident, parser.head.flags, parser.question[0].type);
-		parser.head.flags |= NSFLAG_QR;
-		parser.head.flags |= NSFLAG_AA;
-		parser.head.author = 1;
-
-		if (parser.question[0].type == NSTYPE_SOA) {
-			parser.head.answer = 1;
-			parser.head.author = 1;
-			memcpy(&parser.answer[0], res, sizeof(*res));
-
-			res = &parser.author[0];
-			res->domain = parser.question[0].domain;
-			res->klass = parser.question[0].klass;
-			res->type = NSTYPE_NS;
-
-			const char **ppname = (const char **)res->value;
-			*ppname = _rr_soa.name_server;
-		}
-
-		if (parser.question[0].type == NSTYPE_NS) {
-			parser.head.answer = 1;
-			parser.head.author = 0;
-			res = &parser.answer[0];
-			res->domain = parser.question[0].domain;
-			res->klass = parser.question[0].klass;
-			res->type = NSTYPE_NS;
-
-			const char **ppname = (const char **)res->value;
-			*ppname = _rr_soa.name_server;
-		}
-
-		char tmpbuf[2048];
-		len = dns_build(&parser, (uint8_t*)tmpbuf, sizeof(tmpbuf));
-		if (len <= 0) {
-			LOG_DEBUG("%04x: dns_build error", parser.head.ident);
-			return -1;
-		}
-
-		err = sendto(up->sockfd, tmpbuf, len, 0, (struct sockaddr *)in_addr1, namlen);
-
-		LOG_DEBUG("%04x > FAKE %d %x SOA", parser.head.ident, err, parser.head.flags);
-		return 0;
-	} else if ((parser.head.flags & NSFLAG_QR) == 0 && SUFFIXES_LEN > 2 && _is_client == 0 &&
-			(domain_plen < SUFFIXES_LEN || strcasecmp(parser.question[0].domain + domain_plen - SUFFIXES_LEN, SUFFIXES))) {
-		parser.head.flags &= NSFLAG_RCODE;
-		parser.head.flags |= (RCODE_REFUSED| NSFLAG_QR);
-
-		parser.head.addon = 1;
-		parser.addon[0].domain = parser.question[0].domain;
-		parser.addon[0].klass = parser.question[0].klass;
-		parser.addon[0].type = NSTYPE_CNAME;
-
-		char tmpbuf[2048];
-		const char ** cname = (const char **)parser.addon[0].value;
-
-		domain_wrap(tmpbuf, parser.question[0].domain, "");
-		*cname = add_domain(&parser, tmpbuf);
-
-		len = dns_build(&parser, (uint8_t*)tmpbuf, sizeof(tmpbuf));
-		if (len <= 0) {
-			LOG_DEBUG("%04x: dns_build error", parser.head.ident);
-			return -1;
-		}
-
-		err = sendto(up->sockfd, tmpbuf, len, 0, (struct sockaddr *)in_addr1, namlen);
-		LOG_DEBUG("%04x > REJECT %d %x SOA", parser.head.ident, err, parser.head.flags);
+	if ((parser.head.flags & NSFLAG_QR) == 0 && fetch_predefine_resource_record(&parser)) {
+		unsigned char tmpbuf[2048];
+		parser.head.flags |= (NSFLAG_QR| NSFLAG_RA);
+		size_t len = dns_build(&parser, tmpbuf, sizeof(tmpbuf));
+		int err = sendto(up->sockfd, tmpbuf, len, 0, (struct sockaddr *)in_addr1, namlen);
+		LOG_DEBUG("send predefine dns resource record: %d %d %d %d", err, errno, namlen, len);
 		return 0;
 	}
 
@@ -1385,6 +1415,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 			return 0;
 		}
 
+		LOG_DEBUG("%x FROM: %s: %s\n", client->l_ident, inet_ntoa(in_addr1->sin_addr), parser.question[0].domain);
 		dns_parser_copy(&client->parser, &parser, client->hold);
 		client->parser.head.ident = client->l_ident;
 		client->flags |= FLAG_RECEIVE;
@@ -1395,6 +1426,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 	int rewrap = 0;
 	char domain[256], mysuffixes[256];
 
+	LOG_DEBUG("%x FROM: %s: %s\n", parser.head.ident, inet_ntoa(in_addr1->sin_addr), parser.question[0].domain);
 	for (int i = 0; i < parser.head.question; i++) {
 		que = &parser.question[i];
 		if (domain_unwrap(domain, que->domain, mysuffixes) != NULL) {
@@ -1550,6 +1582,18 @@ void suffixes_config(int isclient, const char *suffixes)
 
 	_is_client = isclient;
 	SUFFIXES_LEN = strlen(SUFFIXES);
+	if (_is_client == 0 && SUFFIXES_LEN > 2) {
+		struct dns_resource *res = &_predefine_resource_record[NS_INDEX];
+		res->domain = SUFFIXES + 1;
+		struct dns_cname *ns = (struct dns_cname *)res->value;
+		ns->alias = _rr_soa.name_server;
+		res->len = sizeof(void*);
+
+		res = &_predefine_resource_record[SOA_INDEX];
+		res->domain = SUFFIXES + 1;
+		res->len = sizeof(_rr_soa);
+		memcpy(res->value, &_rr_soa, sizeof(_rr_soa));
+	}
 
 	return;
 }

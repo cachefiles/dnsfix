@@ -17,6 +17,7 @@
 #define NSTYPE_NSEC   47
 #define NSTYPE_NSEC3  50
 #define NSTYPE_HTTPS  65
+#define NSTYPE_ANY    0xffff
 
 #define NSSIG_SOA   "ssuuuuu"
 #define NSSIG_MX    "qs"

@@ -236,6 +236,10 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 		dotp += sizeof(nsclass);
 	}
 
+	if (parser->head.question != num) {
+		return NULL;
+	}
+
 	for (num = 0; dotp < limit && num < parser->head.answer; num ++)  {
 		res = &parser->answer[num];
 
@@ -255,6 +259,10 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 
 		dotp = rsc_verify_handle(res, parser, dotp, frame, len);
 		dotp += f0.len;
+	}
+
+	if (parser->head.answer != num) {
+		return NULL;
 	}
 
 	for (num = 0; dotp < limit && num < parser->head.author; num ++)  {
@@ -278,6 +286,10 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 		dotp += f0.len;
 	}
 
+	if (parser->head.author != num) {
+		return NULL;
+	}
+
 	for (num = 0; dotp < limit && num < parser->head.addon; num ++)  {
 		res = &parser->addon[num];
 
@@ -298,6 +310,10 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 		dotp = rsc_verify_handle(res, parser, dotp, frame, len);
 		dotp += f0.len;
 
+	}
+
+	if (parser->head.addon != num) {
+		return NULL;
 	}
 
 	if (dotp > limit) {

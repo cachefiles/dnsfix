@@ -482,6 +482,12 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 	assert(parser->head.answer < MAX_RECORD_COUNT);
 	for (num = 0; dotp < limit && num < parser->head.answer; num ++)  {
 		res = &parser->answer[num];
+		char ** cname = (char **)res->value;
+		if (res->type == NSTYPE_CNAME && res->domain == *cname) {
+			phead->answer = htons(htons(phead->answer) - 1);
+			continue;
+		}
+
 		dotp = dn_put_resource(dotp, limit, res, parser);
 	}
 

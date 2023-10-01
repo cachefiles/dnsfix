@@ -32,7 +32,7 @@ LOCAL_CXXFLAGS += -g -Wall -Wno-sign-compare -I.
 
 VPATH := $(THIS_PATH)/libtx:$(THIS_PATH)
 
-LOCAL_TARGETS = dnsfix
+LOCAL_TARGETS = dnsfix dns_lookup dnsfixd
 
 .PHONY: all
 all: $(LOCAL_TARGETS) stunc
@@ -42,6 +42,12 @@ CXXFLAGS := $(LOCAL_CXXFLAGS)
 LDLIBS := $(LOCAL_LDLIBS)
 LDFLAGS := $(LOCAL_LDFLAGS)
 OBJECTS := ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o dnsproto.o router.o subnet_data.o subnet_api.o
+
+dns_lookup: dns_lookup.o dnsproto.o subnet_api.o subnet_data.o
+	$(CC) $(LDFLAGS) -o $@ $^ -lresolv
+
+dnsfixd: dns_fixd.o dnsproto.o subnet_api.o subnet_data.o libtx.a
+	$(CC) $(LDFLAGS) -o $@ $^  $(LDLIBS)
 
 dnsfix.exe: dnsfix
 	cp $< $@

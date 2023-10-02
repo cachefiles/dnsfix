@@ -162,13 +162,39 @@ static int answer_cache_lookup(const char *domain, int type, struct dns_resource
         return count;
     }
 
-    for (int j = 0; j < nanswer; j++) {
-        res = &answsers[j];
-        if (res->type == NSTYPE_CNAME && !strcasecmp(domain, res->domain)) {
-            results[count] = *res;
-            count++;
-        }
-    }
+	int oldcount = 0;
+	const char *trace = domain;
+
+	do {
+		oldcount = count;
+		for (int j = 0; j < nanswer; j++) {
+			res = &answsers[j];
+			if (res->type == NSTYPE_CNAME && !strcasecmp(trace, res->domain)) {
+				const char *newtrace = *(char **)res->value;
+
+				if (0 == strcasecmp(newtrace, trace)) {
+						LOG_DEBUG("bad cname: %s", newtrace);
+						return 0;
+				}
+
+				for (int i = 0; i <  count; i++) {
+					if (strcasecmp(newtrace, results[i].domain) == 0) {
+						LOG_DEBUG("bad cname %s %s", newtrace, results[i].domain);
+						return 0;
+					}
+				}
+
+				trace = newtrace;
+				results[count] = *res;
+				count++;
+			}
+		}
+	} while (oldcount != count);
+
+	if (count > 0 && strcasecmp(trace, domain)) {
+		int plus = answer_cache_lookup(trace, type, results + count, size - count);
+		count += plus;
+	}
 
 	return count;
 }
@@ -180,6 +206,7 @@ static int hold_to_answer(struct dns_resource *res, size_t count)
 
     move_to_cache(res, count);
 
+	void *lastptr[256] = {};
     for (i = 0; i < count; i++) {
         f = res + i;
 
@@ -194,7 +221,8 @@ static int hold_to_answer(struct dns_resource *res, size_t count)
         int found = 0;
         for (j = 0; j < nanswer; j++) {
             t = &answsers[j];
-            if (t->domain == f->domain && t->type == f->type) {
+            if (strcasecmp(t->domain, f->domain) == 0 && t->type == f->type && (lastptr[t->type] < t)) {
+				lastptr[t->type] = t;
                 *t = *f;
                 found = 1;
                 break;
@@ -215,14 +243,18 @@ static int nauthor;
 static struct dns_resource authors[1024];
 
 struct query_context_t {
+	int refcnt;
 	struct sockaddr_in from;
+	struct dns_question que;
 	struct dns_parser parser;
 
 	int nworker, iworker;
-	uint8_t hold[1280];
 	struct dns_resource worker[260];
+	void *assioc_uptr;
 };
 
+static int _qc_next = 0;
+static uint8_t _qc_hold[2048];
 static struct query_context_t _query_list[0xfff];
 
 int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src, uint8_t *buf)
@@ -230,6 +262,8 @@ int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src, uint8_t *buf
     size_t len  = dns_build(src, buf, 2048);
     return dns_parse(dst, buf, len) == NULL;
 }
+
+static int do_lookup_nameserver(dns_udp_context_t *up, struct query_context_t *qc, const char * domain);
 
 static int author_cache_lookup(const char *domain, struct dns_resource results[], size_t size)
 {
@@ -341,6 +375,7 @@ static int hold_to_author(struct dns_resource *res, size_t count)
 
     move_to_cache(res, count);
 
+	void *lastptr[256] = {};
     for (i = 0; i < count; i++) {
         f = res + i;
 
@@ -355,7 +390,8 @@ static int hold_to_author(struct dns_resource *res, size_t count)
         int found = 0;
         for (j = 0; j < nauthor; j++) {
             t = &authors[j];
-            if (t->domain == f->domain && t->type == f->type && (f->type == NSTYPE_A ||  0 == memcmp(t->value, f->value, sizeof(void*)))) {
+            if (t->domain == f->domain && t->type == f->type && (lastptr[f->type] < t)) {
+				lastptr[t->type] = t;
                 *t = *f;
                 found = 1;
                 break;
@@ -388,6 +424,13 @@ static int do_fetch_resource(dns_udp_context_t *up, int ident, struct dns_questi
 	p0.head.ident  = ident;
 	p0.question[0] = *que;
 
+	p0.head.addon = 1;
+	p0.addon[0].domain = "";
+	p0.addon[0].type   = NSTYPE_OPT;
+	p0.addon[0].ttl    = 0;
+	p0.addon[0].klass  = 1230;
+	p0.addon[0].len    = 0;
+
 	size_t len = dns_build(&p0, buf, sizeof(buf));
 
 	target.sin_family = AF_INET;
@@ -395,27 +438,88 @@ static int do_fetch_resource(dns_udp_context_t *up, int ident, struct dns_questi
 	target.sin_addr   = *server;
 
 	size_t slen = sendto(up->outfd, buf, len, 0, (struct sockaddr *)&target, sizeof(target));
-	LOG_DEBUG("sendto %s/%s data %d %d", server_name, inet_ntoa(*server), len, slen);
+	LOG_DEBUG("do_fetch_resource sendto %s/%s data %d %d %s %d", server_name, inet_ntoa(*server), len, slen, que->domain, que->type);
 }
 
-static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, struct dns_resource *answer, size_t count)
+static int dns_query_append(struct query_context_t *qc, struct dns_resource *answer, size_t count)
+{
+	int i;
+	struct dns_resource *res;
+
+	for (i = 0; i < count; i++) {
+		res = answer + i;
+		if (res->type != NSTYPE_A) continue;
+		qc->worker[qc->nworker++] = *res;
+		qc->iworker = qc->nworker - 1;
+	}
+
+	return 0;
+}
+
+static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, struct dns_resource *answer, size_t count, int author)
 {
 	int i, len, slen;
 	uint8_t buf[2048];
 	struct dns_parser *p = &qc->parser;
 
-	p->head.answer = count;
-	for (i = 0; i < count; i++)
-		p->answer[i] = answer[i];
-
 	p->head.flags |= 0x8000;
+
+	p->head.answer = 0;
+	p->head.author = 0;
+
+	if (p->head.question > 1) {
+
+		for (i = 1; i < p->head.question; i++) {
+			struct dns_resource *res = &p->answer[p->head.answer++];
+			struct dns_question *que0 = &p->question[i -1];
+			struct dns_question *que1 = &p->question[i];
+
+			res->domain = add_domain(p, que0->domain);
+			res->type   = NSTYPE_CNAME;
+			res->klass  = NSCLASS_INET;
+			res->ttl    = 600;
+
+			*(const char **)res->value = add_domain(p, que1->domain);
+		}
+
+		p->head.question = 1;
+	}
+
+	if (author == 0) {
+		for (i = 0; i < count; i++)
+			p->answer[p->head.answer++] = answer[i];
+	} else {
+		for (i = 0; i < count; i++)
+			p->author[p->head.author++] = answer[i];
+	}
+
 
 	len = dns_build(p, buf, sizeof(buf));
 	if (len == -1) 
 		LOG_DEBUG("dns_build failure");
 	
 	slen = sendto(up->sockfd, buf, len, 0, (struct sockaddr *)&qc->from, sizeof(qc->from));
-	LOG_DEBUG("sendto %d %s", slen, inet_ntoa(qc->from.sin_addr));
+	LOG_DEBUG("do_query_resource sendto %d %s %s", slen, inet_ntoa(qc->from.sin_addr), p->question[0].domain);
+	return 0;
+}
+
+static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, struct dns_question *que);
+static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc, struct dns_question *que);
+
+static int do_lookup_update(dns_udp_context_t *up, struct query_context_t *qc, const char *alias)
+{
+	struct dns_parser *p = &qc->parser;
+	int offset = p->head.question++;
+	struct dns_question *que = &p->question[offset];
+
+	p->question[offset].domain = add_domain(p, alias);
+	p->question[offset].type  = p->question[0].type;
+	p->question[offset].klass = NSCLASS_INET;
+	LOG_DEBUG("do_lookup_update: %d cname %s -> %s", offset, p->question[offset -1].domain, alias);
+
+	qc->iworker = 0; 
+	qc->nworker = 0; 
+	do_query_resource(up, qc, que);
 	return 0;
 }
 
@@ -427,8 +531,37 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 
 	int count = answer_cache_lookup(que->domain, que->type, answer, 256);
 	if (count > 0) {
-		LOG_DEBUG("answer_cache_lookup: %d", count);
-		do_query_response(up, qc, answer, count);
+		struct query_context_t *c = (struct query_context_t *)qc->assioc_uptr;
+		LOG_DEBUG("answer_cache_lookup: result %d %p %p", count, qc, c);
+		struct dns_question *que = &qc->parser.question[qc->parser.head.question -1];
+
+		int found = 0;
+		const char *alias = NULL;
+
+		for (int i = 0; i < count; i++) {
+			res = answer + i;
+			if (que->type == res->type) {
+				found = 1;
+			}
+
+			if (res->type == NSTYPE_CNAME) {
+				alias = *(char **)res->value;
+				LOG_DEBUG("%s %s", res->domain, alias);
+			}
+		}
+
+		if (alias != NULL && found == 0) {
+			do_lookup_update(up, qc, alias);
+			return 0;
+		}
+
+		if (qc->assioc_uptr == NULL) {
+			do_query_response(up, qc, answer, count, 0);
+		} else if (qc != qc->assioc_uptr) {
+			qc->refcnt --;
+			dns_query_append(c, answer, count);
+			dns_query_continue(up, c, &c->parser.question[c->parser.head.question -1]);
+		}
 		return count;
 	}
 
@@ -500,10 +633,10 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 
 	while (qc->iworker >= 0) {
 		res = &qc->worker[qc->iworker];
+		qc->iworker--;
 		if (res->ttl == 0)
 			continue;
 
-		qc->iworker--;
 		switch (res->type) {
 			case NSTYPE_A:
 				do_fetch_resource(up, qc->parser.head.ident, que, (struct in_addr *)res->value, res->domain);
@@ -512,12 +645,19 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 
 			case NSTYPE_NS:
 				LOG_DEBUG("NSTYPE_NS: %s %s\n", res->domain, *(char **)res->value);
-				break;
+				do_lookup_nameserver(up, qc, *(char **)res->value);
+				qc->refcnt ++;
+				res->ttl = 0;
+				return 0;
 
 			default:
 				assert(0);
 				break;
 		}
+	}
+
+	if (qc->iworker == 0 && qc->refcnt == 0) {
+		LOG_DEBUG("no server response");
 	}
 
 	return 0;
@@ -531,8 +671,36 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 
 	count = answer_cache_lookup(que->domain, que->type, answer, 260);
 	if (count > 0) {
-		LOG_DEBUG("answer_cache_lookup: %d", count);
-		do_query_response(up, qc, answer, count);
+		struct query_context_t *c = (struct query_context_t *)qc->assioc_uptr;
+		LOG_DEBUG("answer_cache_lookup: result %d %p %p", count, qc, c);
+		struct dns_question *que = &qc->parser.question[qc->parser.head.question -1];
+
+		int found = 0;
+		const char *alias = NULL;
+
+		for (int i = 0; i < count; i++) {
+			res = answer + i;
+			if (que->type == res->type) {
+				found = 1;
+			}
+
+			if (res->type == NSTYPE_CNAME) {
+				alias = *(char **)res->value;
+			}
+		}
+
+		if (alias != NULL && found == 0) {
+			do_lookup_update(up, qc, alias);
+			return 0;
+		}
+
+		if (qc->assioc_uptr == NULL) {
+			do_query_response(up, qc, answer, count, 0);
+		} else if (qc != qc->assioc_uptr) {
+			c->refcnt --;
+			dns_query_append(c, answer, count);
+			dns_query_continue(up, c, &c->parser.question[c->parser.head.question -1]);
+		}
 		return count;
 	}
 
@@ -546,19 +714,21 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 	qc->iworker = count - 1;
 	while (qc->iworker >= 0) {
 		res = &qc->worker[qc->iworker];
+		qc->iworker--;
 		if (res->ttl == 0)
 			continue;
-		res->ttl = 0;
 
-		qc->iworker--;
 		switch (res->type) {
 			case NSTYPE_A:
 				do_fetch_resource(up, qc->parser.head.ident, que, (struct in_addr *)res->value, res->domain);
+				res->ttl = 0;
 				return 0;
 
 			case NSTYPE_NS:
-				LOG_DEBUG("NSTYPE_NS: %s %s\n", res->domain, *(char **)res->value);
-				break;
+				do_lookup_nameserver(up, qc, *(char **)res->value);
+				qc->refcnt ++;
+				res->ttl = 0;
+				return 0;
 
 			default:
 				assert(0);
@@ -566,6 +736,30 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 		}
 	}
 
+	if (qc->iworker == 0 && qc->refcnt == 0) {
+		LOG_DEBUG("no server response");
+	}
+
+	return 0;
+}
+
+static int do_lookup_nameserver(dns_udp_context_t *up, struct query_context_t *qc, const char * domain)
+{
+	struct query_context_t *outqc = &_query_list[(_qc_next++ & 0xfff)];
+	struct dns_parser *p = &outqc->parser;
+
+	memset(outqc, 0, sizeof(*outqc));
+	p->head.ident = (_qc_next - 1);
+	p->question[0].domain = add_domain(p, domain);
+	p->question[0].type = NSTYPE_A;
+	p->question[0].klass = NSCLASS_INET;
+	p->head.question = 1;
+	outqc->assioc_uptr = qc;
+	
+	outqc->refcnt = 0;
+	outqc->iworker = outqc->nworker = 0;
+	LOG_DEBUG("query nameserver: %s", domain);
+	do_query_resource(up, outqc, &p->question[0]);
 	return 0;
 }
 
@@ -580,7 +774,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 
     pparse = dns_parse(&parser, (uint8_t *)buf, count);
     if (pparse == NULL || parser.head.question == 0) {
-        LOG_DEBUG("FROM: %s dns_forward dns_parse failure", inet_ntoa(in_addr1->sin_addr));
+        LOG_DEBUG("FROM: %s dns_forward dns_parse failure %p", inet_ntoa(in_addr1->sin_addr), pparse);
         return -1;
     }
 
@@ -590,14 +784,20 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 	}
 
 	struct query_context_t *qc = &_query_list[parser.head.ident & 0xfff];
-	dns_parser_copy(&qc->parser, &parser, qc->hold);
+	memset(qc, 0, sizeof(*qc));
+	dns_parser_copy(&qc->parser, &parser, _qc_hold);
 
 	qc->from = *in_addr1;
-	for (int i = 0;  i < qc->parser.head.question; i++) {
-		que = &qc->parser.question[i];
-		LOG_DEBUG("Q [%d] %s %d", i, que->domain, que->type);
+	qc->iworker = qc->nworker = 0;
+	qc->assioc_uptr = 0;
+	qc->refcnt = 0;
+
+	assert (qc->parser.head.question == 1);
+	// for (int i = 0;  i < qc->parser.head.question; i++) {
+		que = &qc->parser.question[0];
+		LOG_DEBUG("Q [%d] %s %d", 0, que->domain, que->type);
 		do_query_resource(up, qc, que);
-	}
+	// }
 
 	return 0;
 }
@@ -612,7 +812,7 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
 
 	p = dns_parse(&p0, (uint8_t *)buf, count);
     if (p == NULL || p0.head.question == 0) {
-        LOG_DEBUG("FROM: %s dns_backward dns_parse failure", inet_ntoa(in_addr1->sin_addr));
+        LOG_DEBUG("FROM: %s dns_backward dns_parse failure %p", inet_ntoa(in_addr1->sin_addr), p);
         return -1;
     }
 
@@ -636,12 +836,16 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
 		}
 	}
 
+	int found_soa = 0;
 	for (i = 0; i < p->head.author; i++) {
 		res = &p->author[i];
 		if (res->type == NSTYPE_NS) {
 			LOG_DEBUG("NS: %s - %s", res->domain, *(char **)(res->value));
 		} else if (res->type == NSTYPE_A) {
 			LOG_DEBUG("V4: %s - %s", res->domain, inet_ntoa(*(struct in_addr *)res->value));
+		} else if (res->type == NSTYPE_SOA) {
+			LOG_DEBUG("V4: %s - %s", res->domain, inet_ntoa(*(struct in_addr *)res->value));
+			found_soa = 1;
 		} else if (res->type == NSTYPE_CNAME) {
 			LOG_DEBUG("CNAME: %s - %s", res->domain, *(char **)(res->value));
 		}
@@ -660,7 +864,21 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
 
 	struct query_context_t *qc = &_query_list[p->head.ident & 0xfff];
 
-	que = &_query_list[p->head.ident & 0xfff].parser.question[0];
+	int offset = qc->parser.head.question;
+	que = &qc->parser.question[offset - 1];
+
+	if (found_soa && p->head.answer == 0) {
+		LOG_DEBUG("question should finish since SOA");
+		if (qc->assioc_uptr != NULL) {
+			qc = (struct query_context_t *)qc->assioc_uptr;
+			qc->refcnt --;
+			LOG_DEBUG("bad namesever found since SOA");
+		} else {
+			do_query_response(up, qc, p->author, p->head.author, 1);
+		}
+		return 0;
+	}
+
 	dns_query_continue(up, qc, que);
 	return 0;
 }

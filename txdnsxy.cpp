@@ -1244,7 +1244,7 @@ void checker_callback(struct cached_client *client, dns_udp_context_t *up)
 		LOG_DEBUG("MM q %d ans %d au %d %s %d", parser->head.question, parser->head.answer, parser->head.author, que->domain, _is_client);
 
 		// q 1 ans 10 au 0 ns3.dnsv5.com 0
-		if (parser->head.answer > 0 && que->type == NSTYPE_A) {
+		if ((parser->head.answer > 0 || strchr(que->domain, '_') == NULL) && que->type == NSTYPE_A) {
 		     LOG_DEBUG("oko xxx q %d ans %d au %d %s %d", parser->head.question, parser->head.answer, parser->head.author, que->domain, _is_client);
 			if (_is_client == 0 && strncmp(que->domain, "_.", 2) != 0 && !have_china(parser)) {
 		     LOG_DEBUG("xxx isok q %d ans %d au %d %s %d", parser->head.question, parser->head.answer, parser->head.author, que->domain, _is_client);
@@ -1271,6 +1271,28 @@ void checker_callback(struct cached_client *client, dns_udp_context_t *up)
 
 			return;
 		}
+
+#if 0
+10-08 08:52:29.000 D MM q 1 ans 0 au 1 _.v2ex.com 0
+10-08 08:52:29.000 D oko xxx q 1 ans 0 au 1 _.v2ex.com 0
+10-08 08:52:29.000 D xxx noword q 1 ans 0 au 1 _.v2ex.com 0
+
+
+10-07 19:40:54.636 I 4378 COMBINE FROM: 8.8.8.8: _.Ds.V6nS.jp2.tEsT-iPv6.COM SOA                                                                                [29/1960]
+10-07 19:40:54.638 D 1f4b RESPONSE: 8.8.8.8: _.Ds.V6nS.jp2.tEsT-iPv6.COM SOA
+10-07 19:40:54.638 D MM q 1 ans 0 au 1 _.Ds.V6nS.jp2.tEsT-iPv6.COM 0
+10-07 19:40:54.639 D SOA: =v6ns1.jp2.tEsT-iPv6.COM=
+10-07 19:40:54.649 I 4378 COMBINE FROM: 8.8.8.8: v6ns1.jp2.tEsT-iPv6.COM A
+10-07 19:40:54.649 D 1f4b RESPONSE: 8.8.8.8: v6ns1.jp2.tEsT-iPv6.COM A
+10-07 19:40:54.649 D MM q 1 ans 0 au 1 v6ns1.jp2.tEsT-iPv6.COM 0
+10-07 19:40:54.649 D 1f4b checker_callback qtype: 0, atype: 1 1 0
+10-07 19:40:54.649 D bbb 8
+10-07 19:40:54.649 D 1f4b untrust_callback should not be call, flags: a
+10-07 19:40:54.649 D 1f4b waiting for checker mytrust_callback b
+10-07 19:40:54.672 I e379 COMBINE FROM: 223.5.5.5: Ds.V6nS.jp2.tEsT-iPv6.COM A
+10-07 19:40:54.674 D 1f4b RESPONSE: 223.5.5.5: Ds.V6nS.jp2.tEsT-iPv6.COM A
+10-07 19:40:54.674 D 1f4b waiting for checker untrust_callback 8
+#endif
 
 		if (parser->head.question == 1 && parser->head.author == 1 && parser->head.answer == 0) {
 			if (_is_client == 0 && strncmp(que->domain, "_.", 2) == 0 && res->type == NSTYPE_SOA) {

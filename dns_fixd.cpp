@@ -536,7 +536,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 	struct dns_resource answer[256];
 
 	int count = answer_cache_lookup(que->domain, que->type, answer, 256);
-	if (count > 0) {
+	if (count > 0 || qc->is_china_domain) {
 		struct query_context_t *c = (struct query_context_t *)qc->assioc_uptr;
 		LOG_DEBUG("answer_cache_lookup: result %d %p %p", count, qc, c);
 		struct dns_question *que = &qc->parser.question[qc->parser.head.question -1];
@@ -652,6 +652,11 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 		}
 	}
 
+	if (qc->is_china_domain) {
+		dns_query_continue(up, qc, que);
+		return 0;
+	}
+
 	while (qc->iworker >= 0) {
 		res = &qc->worker[qc->iworker];
 		qc->iworker--;
@@ -691,7 +696,7 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 	struct dns_resource answer[2560];
 
 	count = answer_cache_lookup(que->domain, que->type, answer, 260);
-	if (count > 0) {
+	if (count > 0 || qc->is_china_domain) {
 		struct query_context_t *c = (struct query_context_t *)qc->assioc_uptr;
 		LOG_DEBUG("answer_cache_lookup: result %d %p %p", count, qc, c);
 		struct dns_question *que = &qc->parser.question[qc->parser.head.question -1];
@@ -739,9 +744,12 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 			int target = *(int *)res->value;
 			if (res->type == NSTYPE_A && lookupRoute(htonl(target)) == 0) {
 				qc->is_china_domain = 1;
+	            dns_query_continue(up, qc, que);
+				return 0;
 			}
 		}
 	}
+
 
 	qc->nworker = count;
 	qc->iworker = count - 1;
@@ -905,7 +913,8 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
         }
 	}
 
-	hold_to_answer(p0.answer, p0.head.answer, is_china_domain);
+	if (is_china_domain == 0)
+		hold_to_answer(p0.answer, p0.head.answer, is_china_domain);
 	hold_to_author(p0.author, p0.head.author);
 	hold_to_author(p0.addon, p0.head.addon);
 

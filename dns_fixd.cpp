@@ -250,10 +250,10 @@ static int _qc_next = 0;
 static uint8_t _qc_hold[2048];
 static struct query_context_t _query_list[0xfff];
 
-int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src, uint8_t *buf)
+int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
 {
-    size_t len  = dns_build(src, buf, 2048);
-    return dns_parse(dst, buf, len) == NULL;
+    size_t len  = dns_build(src, _qc_hold, 2048);
+    return dns_parse(dst, _qc_hold, len) == NULL;
 }
 
 static int do_lookup_nameserver(dns_udp_context_t *up, struct query_context_t *qc, const char * domain);
@@ -461,6 +461,7 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 	p->head.answer = 0;
 	p->head.author = 0;
 
+	const char *lastdn = NULL;
 	if (p->head.question > 1) {
 
 		for (i = 1; i < p->head.question; i++) {
@@ -473,20 +474,39 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 			res->klass  = NSCLASS_INET;
 			res->ttl    = 600;
 
-			*(const char **)res->value = add_domain(p, que1->domain);
+			*(const char **)res->value = lastdn = add_domain(p, que1->domain);
 		}
 
 		p->head.question = 1;
 	}
 
-	if (author == 0) {
-		for (i = 0; i < count; i++)
-			p->answer[p->head.answer++] = answer[i];
+	if (p->head.answer > 0 && !qc->is_china_domain) {
+		p->head.answer = 0;
 	} else {
-		for (i = 0; i < count; i++)
-			p->author[p->head.author++] = answer[i];
+		lastdn = NULL;
 	}
 
+	if (author == 0) {
+			struct dns_resource *res;
+		for (i = 0; i < count; i++) {
+			res = &p->answer[p->head.answer];
+			p->answer[p->head.answer++] = answer[i];
+			if (lastdn && strcasecmp(res->domain, lastdn) == 0) {
+				res->domain = p->question[0].domain;
+			}
+		}
+	} else {
+			struct dns_resource *res;
+		for (i = 0; i < count; i++) {
+			res = &p->author[p->head.author];
+			p->author[p->head.author++] = answer[i];
+			if (lastdn && strcasecmp(res->domain, lastdn) == 0) {
+				res->domain = p->question[0].domain;
+			}
+		}
+	}
+
+#if 0
 	if (qc->is_china_domain) {
 		p->head.addon = 1;
 		struct dns_resource *res = &p->addon[0];
@@ -498,6 +518,7 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 
 		*(const char **)res->value = add_domain(p, "yes.com");
 	}
+#endif
 
 
 	len = dns_build(p, buf, sizeof(buf));
@@ -666,6 +687,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 		switch (res->type) {
 			case NSTYPE_A:
 				do_fetch_resource(up, qc->parser.head.ident, que, (struct in_addr *)res->value, res->domain);
+				LOG_DEBUG("NSTYPE_A: %s %s\n", res->domain, inet_ntoa(*(struct in_addr*)res->value));
 				res->ttl = 0;
 				return 0;
 
@@ -762,6 +784,7 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 		switch (res->type) {
 			case NSTYPE_A:
 				do_fetch_resource(up, qc->parser.head.ident, que, (struct in_addr *)res->value, res->domain);
+				LOG_DEBUG("NSTYPE_A: (0) %s %s\n", res->domain, inet_ntoa(*(struct in_addr*)res->value));
 				res->ttl = 0;
 				return 0;
 
@@ -826,7 +849,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 
 	struct query_context_t *qc = &_query_list[parser.head.ident & 0xfff];
 	memset(qc, 0, sizeof(*qc));
-	dns_parser_copy(&qc->parser, &parser, _qc_hold);
+	dns_parser_copy(&qc->parser, &parser);
 
 	qc->from = *in_addr1;
 	qc->iworker = qc->nworker = 0;
@@ -837,6 +860,25 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 	// for (int i = 0;  i < qc->parser.head.question; i++) {
 		que = &qc->parser.question[0];
 		LOG_DEBUG("Q [%d] %s %d", 0, que->domain, que->type);
+		const char *domain = que->domain;
+		size_t dolen = strlen(domain);
+		const char SUFFIXIES[] = ".z.855899.xyz";
+
+		LOG_DEBUG("domain %s %s %d %d", domain, domain + dolen + 1 - sizeof(SUFFIXIES), dolen, sizeof(SUFFIXIES));
+		if (dolen > sizeof(SUFFIXIES) &&
+				!strcasecmp(SUFFIXIES, domain + dolen + 1 - sizeof(SUFFIXIES))) {
+			char _domain[128];
+			_domain[sizeof(_domain) -1] = 0;
+			strncpy(_domain, que->domain, sizeof(_domain) -1);
+
+			qc->parser.question[1] = qc->parser.question[0];
+			qc->parser.head.question++;
+			que = &qc->parser.question[1];
+			_domain[dolen + 1 - sizeof(SUFFIXIES)] = 0;
+			LOG_DEBUG("_domain %s", _domain);
+			que->domain = add_domain(&qc->parser, _domain);
+		}
+
 		do_query_resource(up, qc, que);
 	// }
 
@@ -996,7 +1038,7 @@ int txdns_create()
 	setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, (char *)&rcvbufsiz, sizeof(rcvbufsiz));
 
 	in_addr1.sin_family = AF_INET;
-	in_addr1.sin_port = htons(53530);
+	in_addr1.sin_port = htons(53);
 	in_addr1.sin_addr.s_addr = htonl(INADDR_ANY);
 	error = bind(sockfd, (struct sockaddr *)&in_addr1, sizeof(in_addr1));
 	TX_CHECK(error == 0, "bind dns socket failure");

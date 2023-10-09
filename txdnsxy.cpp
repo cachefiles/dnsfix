@@ -359,7 +359,6 @@ static struct cached_client {
 	} from;
 
 	char suffixies[64];
-	uint8_t hold[2048];
 	struct dns_parser parser;
 	forward_callback  callback;
 } __cached_client[4096];
@@ -1181,10 +1180,11 @@ remove_cname:
 	return 0;
 }
 
-int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src, uint8_t *buf)
+int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
 {
-	size_t len  = dns_build(src, buf, 2048);
-	return dns_parse(dst, buf, len) == NULL;
+	static uint8_t _hold[2048];
+	size_t len  = dns_build(src, _hold, 2048);
+	return dns_parse(dst, _hold, len) == NULL;
 }
 
 int setup_forwarder(struct cached_client *client, int index, struct sockaddr_in *from, size_t namelen, struct dns_parser *parser, forward_callback callback)
@@ -1194,7 +1194,7 @@ int setup_forwarder(struct cached_client *client, int index, struct sockaddr_in 
 
 	client->l_ident = parser->head.ident;
 	client->r_ident = (rand() & 0xF000) | index;
-	dns_parser_copy(&client->parser, parser, client->hold);
+	dns_parser_copy(&client->parser, parser);
 	client->callback = callback;
 
 	return 0;
@@ -1814,7 +1814,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 		}
 
 		LOG_DEBUG("%x RESPONSE: %s: %s %s\n", client->l_ident, inet_ntoa(in_addr1->sin_addr), parser.question[0].domain, dns_type(parser.question[0].type));
-		dns_parser_copy(&client->parser, &parser, client->hold);
+		dns_parser_copy(&client->parser, &parser);
 		client->parser.head.ident = client->l_ident;
 		client->flags |= FLAG_RECEIVE;
 		client->callback(client, up);

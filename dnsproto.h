@@ -16,6 +16,7 @@
 #define NSTYPE_RRSIG  46
 #define NSTYPE_NSEC   47
 #define NSTYPE_NSEC3  50
+#define NSTYPE_SVCB   64
 #define NSTYPE_HTTPS  65
 #define NSTYPE_ANY    0xffff
 
@@ -33,8 +34,8 @@
 #define NSSIG_NSEC3 "B"
 #define NSSIG_RRSIG "B"
 #define NSSIG_OPT   "B"
-#define NSSIG_DS   "B"
-// #define NSSIG_HTTPS "qsqqs"
+#define NSSIG_DS    "B"
+#define NSSIG_SVCB  "B"
 #define NSSIG_HTTPS "B"
 
 #define MAX_RECORD_COUNT 32

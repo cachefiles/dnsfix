@@ -58,10 +58,47 @@ static const char * rsrc_verify_signature[256] = {
 	[NSTYPE_RRSIG] = NSSIG_RRSIG,
 	[NSTYPE_NSEC] = NSSIG_NSEC,
 	[NSTYPE_NSEC3] = NSSIG_NSEC3,
+	[NSTYPE_SVCB] = NSSIG_SVCB,
 	[NSTYPE_HTTPS] = NSSIG_HTTPS,
 };
 
 #define ARRAY_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
+
+const char *add_value(struct dns_parser *parser, const void *dn, size_t len)
+{
+	int i;
+	int l;
+	int n = parser->strcnt;
+
+	for (i = 0; i < parser->strcnt; i++) {
+		if (memcmp(parser->strptr[i], dn, len) == 0) {
+			return parser->strptr[i];
+		}
+	}
+
+	if (parser->strcnt >= ARRAY_SIZE(parser->strptr)) {
+		fprintf(stderr, "str index is full\n");
+		return NULL;
+	}
+
+	if (parser->lastptr == NULL) {
+		assert (parser->strcnt == 0);
+		parser->lastptr = parser->strtab;
+	}
+
+	l = len;
+	if (parser->lastptr + l + 1
+			>= parser->strtab + sizeof(parser->strtab)) {
+		fprintf(stderr, "str buf is full\n");
+		return NULL;
+	}
+
+	parser->strcnt++;
+	memcpy(parser->lastptr, dn, l + 1);
+	parser->strptr[n] = parser->lastptr;
+	parser->lastptr += (l + 1);
+	return parser->strptr[n];
+}
 
 const char *add_domain(struct dns_parser *parser, const char *dn)
 {
@@ -117,7 +154,8 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 				case 'B':
 					valptr += sizeof(dopt);
 					assert(valptr < vallimit);
-					memcpy(btr, &dopt, sizeof(dopt));
+					void * dotp0 = add_value(parse, dopt, res->len);
+					memcpy(btr, &dotp0, sizeof(dotp0));
 					dopt += res->len;
 					break;
 
@@ -147,7 +185,7 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 					assert(valptr < vallimit);
 
 					len = *dopt++;
-                                        snprintf(dn, len + 1, "%s", dopt);
+					snprintf(dn, len + 1, "%s", dopt);
 					if (len > 0 && (dnp = add_domain(parse, dn))) {
 						memcpy(btr, &dnp, sizeof(dnp));
 						dopt += len;

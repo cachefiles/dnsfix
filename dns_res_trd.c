@@ -1,0 +1,625 @@
+#include <ctype.h>
+#include <stdio.h>
+#include <errno.h>
+#include <string.h>
+#include <time.h>
+#include <assert.h>
+#include <stdlib.h>
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <sys/select.h>
+
+#include <netinet/in.h>
+#include <arpa/nameser.h>
+#include <resolv.h>
+#include "dnsproto.h"
+#include "subnet_api.h"
+
+#define LOG_DEBUG(fmt, args...) fprintf(stderr, fmt"\n", ##args)
+
+#ifdef WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <netdb.h>
+#define closesocket close
+#endif
+
+#define NSCLASS_INET 0x01
+#define NSFLAG_RD    0x0100
+
+struct dns_context {
+	int outfd;
+	int sockfd;
+
+	socklen_t dnslen;
+	struct sockaddr *dnsaddr;
+};
+
+struct dns_query_context {
+	int is_china_domain;
+	int is_nonchina_domain;
+	struct sockaddr_in6 from;
+	struct dns_parser parser;
+	struct dns_parser ecs_parser;
+	struct dns_parser def_parser;
+};
+
+static struct dns_query_context _orig_list[0xfff];
+
+static int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
+{
+    static uint8_t _qc_hold[2048];
+    size_t len  = dns_build(src, _qc_hold, sizeof(_qc_hold));
+    return dns_parse(dst, _qc_hold, len) == NULL;
+}
+
+static int contains_subnet(struct dns_parser *p0)
+{
+	struct dns_resource *res = NULL;
+
+	for (int i = 0; i < p0->head.addon; i++) {
+		res = &p0->addon[i];
+		if (res->type != NSTYPE_OPT) {
+			continue;
+		}
+
+		if (res->domain == NULL || *res->domain == 0) {
+			size_t len = res->len;
+			const uint8_t * valp = *(const uint8_t **)res->value;
+			struct tagheader {uint16_t tag; uint16_t len; } tag0;
+
+			while (len > sizeof(tag0)) {
+				memcpy(&tag0, valp, sizeof(tag0));
+				if (len < sizeof(tag0) + htons(tag0.len)) break;
+				const uint8_t *hold = valp;
+				valp += sizeof(tag0) + htons(tag0.len);
+				len -= (sizeof(tag0) + htons(tag0.len));
+				if (tag0.tag == htons(0x0008)) {
+					return 1;
+				}
+			}
+		}
+	}
+
+	return 0;
+}
+
+static int add_client_subnet(struct dns_parser *p0, uint8_t *optbuf)
+{
+#ifndef DISABLE_SUBNET
+	// china mobile 223.104.213.0/24
+	const static char subnet_data[] = "\x00\x08\x00\x07\x00\x01\x18\x00\xdf\x68\xd5";
+
+#define subnet_len (sizeof(subnet_data) - 1)
+
+	int have_edns = 0;
+	struct dns_resource *res = NULL;
+
+	for (int i = 0; i < p0->head.addon; i++) {
+		res = &p0->addon[i];
+		if (res->type != NSTYPE_OPT) {
+			continue;
+		}
+
+		if (res->domain == NULL || *res->domain == 0) {
+			size_t len = res->len;
+			const uint8_t * valp = *(const uint8_t **)res->value;
+			struct tagheader {uint16_t tag; uint16_t len; } tag0;
+
+			while (len > sizeof(tag0)) {
+				memcpy(&tag0, valp, sizeof(tag0));
+				if (len < sizeof(tag0) + htons(tag0.len)) break;
+				const uint8_t *hold = valp;
+				valp += sizeof(tag0) + htons(tag0.len);
+				len -= (sizeof(tag0) + htons(tag0.len));
+				if (tag0.tag == htons(0x0008)) {
+					const uint8_t * valp0 = *(const uint8_t **)res->value;
+					memcpy(optbuf, valp0, (hold - valp0));
+					memcpy(optbuf + (hold - valp0), valp, len);
+
+					memcpy(optbuf + (hold - valp0) + len, subnet_data, subnet_len);
+					*(void **)res->value = optbuf;
+					res->len = len + (hold - valp0) + subnet_len;
+					have_edns = 0;
+					break;
+				}
+			}
+
+			if (have_edns == 0) {
+				const uint8_t * valp = *(const uint8_t **)res->value;
+				memcpy(optbuf, valp, res->len);
+				memcpy(optbuf + res->len, subnet_data, subnet_len);
+				*(void **)res->value = optbuf;
+				res->len += subnet_len;
+			}
+		}
+	}
+
+	if (p0->head.addon == 0) {
+		res = &p0->addon[0];
+		p0->head.addon = 1;
+
+		res->domain = "";
+		res->klass = 0x1000;
+		res->type = NSTYPE_OPT;
+		res->ttl  = 0;
+		res->len  = subnet_len;
+		*(const void **)res->value = subnet_data;
+	}
+#endif
+
+	return 0;
+}
+
+static int dns_contains(const char *domain)
+{
+	int i;
+	const char *_tld0[] = {
+		"ten.", "ude.", "oc.", "gro.", "moc.", "vog.", NULL
+	};
+	const char *_tld1[] = {
+		"net.", "edu.", "co.", "org.", "com.", "gov.", NULL
+	};
+
+	for (i = 0; _tld0[i]; i++) {
+		if (strncmp(domain, _tld0[i], 4) == 0) {
+			return 1;
+		}
+	}
+
+	if (strncmp(domain, "oc.", 3) == 0) {
+		return 1;
+	}
+
+	return 0;
+}
+
+static int dns_unwrap(struct dns_parser *p1)
+{
+	int num = p1->head.question;
+	const char *domain = NULL;
+	struct dns_question *que, *que1;
+
+	que = &p1->question[0];
+	que1 = &p1->question[1];
+	*que1 = *que;
+
+	int ndot = 0;
+	char *limit, *optp;
+	char *dots[8], title[256];
+
+	LOG_DEBUG("suffixes: %s", que->domain);
+
+	title[sizeof(title) -1] = 0;
+	strncpy(title, que->domain, sizeof(title) -1);
+
+	dots[ndot++] = title;
+	for (domain = title; *domain; domain++)
+		if (*domain == '.') dots[ndot++&0x7] = domain + 1;
+
+	// mail.oogleg.moc.cooltail.com
+	if (ndot < 3) {
+		LOG_DEBUG("dns_unwrap failure");
+		return -1;
+	}
+
+	ndot -= 2;
+	dots[ndot & 0x7][-1] = 0;
+	LOG_DEBUG("suffixes: %s %s", dots[ndot & 0x7], title);
+
+	assert(ndot > 0);
+	limit = dots[ndot & 0x7] -2;
+	ndot--;
+	optp = dots[ndot & 0x7];
+
+	int cc = 0;
+	if (ndot < 1) {
+		LOG_DEBUG("dns_unwrap warning %s", title);
+		que1->domain = add_domain(p1, title);
+		return 0;
+	}
+
+	if (optp + 1 == limit) {
+		limit = dots[ndot & 0x7] -2;
+		ndot--;
+		optp = dots[ndot & 0x7];
+		cc = 1;
+	}
+
+	if (cc == 0 || dns_contains(optp)) {
+		for (; *optp && optp < limit; optp++) {
+			char t = *optp;
+			*optp++ = *limit;
+			*limit-- = t;
+		}
+
+		if (ndot < 1) {
+			LOG_DEBUG("dns_unwrap ork %s", title);
+			que1->domain = add_domain(p1, title);
+			return 0;
+		}
+
+		LOG_DEBUG("xx dns_unwrap %s %d", title, cc);
+		limit = dots[ndot & 0x7] -2;
+		ndot--;
+		optp = dots[ndot & 0x7];
+	}
+
+#if 0
+	if (ndot < 1) {
+		LOG_DEBUG("dns_unwrap warning %s", title);
+		que1->domain = add_domain(p1, title);
+		return 0;
+	}
+#endif
+
+	char t = *limit;
+	LOG_DEBUG("zz dns_unwrap %s %c %s", title, t, optp);
+	memmove(optp + 1, optp, limit - optp);
+	*optp = t;
+
+	LOG_DEBUG("zz dns_unwrap %s %d", title, cc);
+	que1->domain = add_domain(p1, title);
+	return 0;
+}
+
+static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockaddr *to, size_t tolen)
+{
+	ssize_t len;
+	uint8_t _hold[2048];
+
+	len = dns_build(parser, _hold, sizeof(_hold));
+
+	const struct sockaddr_in *inp = (const struct sockaddr_in *)to;
+	LOG_DEBUG("dns_build bytes %d %d %d %s", len, inp->sin_family, htons(inp->sin_port), inet_ntoa(inp->sin_addr));
+	if (len != -1)
+		len = sendto(outfd, _hold, len, 0, to, tolen);
+	else
+		LOG_DEBUG("dns_build %d", len);
+
+	return len;
+}
+
+int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
+{
+	struct dns_parser p0;
+	struct dns_parser *pp;
+
+	pp = dns_parse(&p0, buf, count);
+	if (pp == NULL) {
+		LOG_DEBUG("do_dns_forward parse failure");
+		return 0;
+	}
+
+    if (p0.head.flags & 0x8000) {
+        LOG_DEBUG("FROM: %s this is not query", "nothing");
+        return -1;
+    }
+	
+	int retval = 0;
+	int offset = (p0.head.ident & 0xfff);
+
+	struct dns_parser *p1 = NULL;
+	struct dns_query_context *qc = &_orig_list[offset];
+	memset(qc, 0, sizeof(*qc));
+	qc->from = *from;
+
+	dns_parser_copy(&qc->parser, &p0);
+	p1 = &qc->parser;
+	if (dns_unwrap(p1) == -1) {
+        LOG_DEBUG("FROM: %s this is not good", p1->question[0].domain);
+		return -1;
+	}
+	p0.question[0] = p1->question[1];
+
+	int save_opt = p0.head.addon;
+	p0.head.addon = 0;
+	p0.head.flags |= NSFLAG_RD;
+	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
+	if (retval == -1) {
+		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
+		return 0;
+	}
+
+	uint8_t optbuf[256];
+	p0.head.addon = save_opt;
+	add_client_subnet(&p0, optbuf);
+	
+	p0.head.ident += 0x1000;
+	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
+	if (retval == -1) {
+		LOG_DEBUG("dns_sendto failure");
+		return 0;
+	}
+
+	if (strchr(p1->question[1].domain, '_') != NULL) {
+		LOG_DEBUG("dns_sendto contains _");
+		qc->is_nonchina_domain = 1;
+		return 0;
+	}
+
+	char _domain[256];
+	snprintf(_domain, sizeof(_domain), "_.%s", p1->question[1].domain);
+	p0.question[0].domain = add_domain(&p0, _domain);
+	p0.question[0].type   = NSTYPE_TXT;
+	p0.head.addon  = 0;
+	p0.head.answer = 0;
+	p0.head.author = 0;
+	p0.head.question = 1;
+
+	p0.head.ident += 0x1000;
+	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
+	if (retval == -1) {
+		LOG_DEBUG("dns_sendto failure");
+		return 0;
+	}
+
+	return 0;
+}
+
+struct dns_soa {
+	const char *nameserver;
+	const char *email;
+};
+
+static int dump_resource(const char *title, struct dns_resource *res)
+{
+	
+	char inet6[256];
+	       if (res->type == NSTYPE_TXT) {
+			LOG_DEBUG("%s %s TXT", title, res->domain);
+	} else if (res->type == NSTYPE_A) {
+			LOG_DEBUG("%s %s A %s", title, res->domain, inet_ntoa(*(struct in_addr *)res->value));
+	} else if (res->type == NSTYPE_NS) {
+			LOG_DEBUG("%s %s NS %s", title, res->domain, *(const char **)res->value);
+	} else if (res->type == NSTYPE_SRV) {
+			LOG_DEBUG("%s %s SRV %p", title, res->domain, *(const char **)res->value);
+	} else if (res->type == NSTYPE_SOA) {
+			LOG_DEBUG("%s %s SOA %s", title, res->domain, *(const char **)res->value);
+	} else if (res->type == NSTYPE_AAAA) {
+			LOG_DEBUG("%s %s AAAA %s", title, res->domain, inet_ntop(AF_INET6, res->value, inet6, sizeof(inet6)));
+	} else if (res->type == NSTYPE_CNAME) {
+			LOG_DEBUG("%s %s CNAME %s", title, res->domain, *(const char **)res->value);
+	} else {
+			LOG_DEBUG("%s %s UNKOWN %d", title, res->domain, res->type);
+	}
+
+	return 0;
+}
+
+int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in *from)
+{
+	struct dns_parser p0;
+	struct dns_parser *pp;
+	struct dns_resource *res;
+
+	pp = dns_parse(&p0, buf, count);
+	if (pp == NULL) {
+		LOG_DEBUG("do_dns_backward parse failure");
+		return 0;
+	}
+
+    if (~p0.head.flags & 0x8000) {
+        LOG_DEBUG("FROM: %s this is not response", inet_ntoa(from->sin_addr));
+        return -1;
+    }
+	
+	int i;
+	int offset = (p0.head.ident & 0xfff);
+	struct dns_query_context *qc = &_orig_list[offset];
+
+	if (strcmp(qc->parser.question[1].domain, p0.question[0].domain)) {
+		struct dns_parser p1 = {};
+		const char *domain = p0.question[0].domain;
+		LOG_DEBUG("query soa: %s %s ", qc->parser.question[1].domain, p0.question[0].domain);
+
+		for (i = 0; i < p0.head.answer; i++) {
+			res = &p0.answer[i];
+			dump_resource("answer ", res);
+		}
+
+		for (i = 0; i < p0.head.author; i++) {
+			res = &p0.author[i];
+			dump_resource("author ", res);
+		}
+
+		for (i = 0; i < p0.head.addon; i++) {
+			res = &p0.addon[i];
+			dump_resource("addon ", res);
+		}
+
+		if (*domain == '_' && domain[1] == '.') {
+			const char *soa_nameserver = NULL;
+			for (i = 0; i < p0.head.author; i++) {
+				res = &p0.author[i];
+				if (res->type == NSTYPE_SOA) {
+					soa_nameserver = *(const char **)res->value;
+					break;
+				}
+			}
+			p1.head.ident    = p0.head.ident;
+			p1.head.flags    = NSFLAG_RD;
+			p1.head.question = 1;
+			p1.question[0].type   = NSTYPE_A;
+			p1.question[0].klass  = NSCLASS_INET;
+
+			if (soa_nameserver && strcasecmp(soa_nameserver, qc->parser.question[1].domain)) {
+				p1.head.ident += 0x1000;
+				p1.question[0].domain = add_domain(&p1, soa_nameserver);
+				dns_sendto(ctx->outfd, &p1, ctx->dnsaddr, ctx->dnslen);
+				return 0;
+			}
+		}
+
+		for (i = 0; i < p0.head.answer; i++) {
+			res = &p0.answer[i];
+			unsigned *v4addrp = res->value;
+			if (res->type == NSTYPE_A && lookupRoute(htonl(*v4addrp))  == NULL) {
+				qc->is_china_domain = 1;
+				break;
+			} else if (res->type == NSTYPE_A && lookupRoute(htonl(*v4addrp))) {
+				qc->is_nonchina_domain = 1;
+			}
+		}
+
+		if (qc->is_china_domain == 0) {
+			qc->is_nonchina_domain = 1;
+		}
+
+		goto check_flush;
+	}
+
+	if (contains_subnet(&p0)) {
+		dns_parser_copy(&qc->ecs_parser, &p0);
+	} else {
+		dns_parser_copy(&qc->def_parser, &p0);
+	}
+
+	for (i = 0; i < p0.head.answer; i++) {
+		res = &p0.answer[i];
+		unsigned *v4addrp = res->value;
+		if (res->type == NSTYPE_A && NULL == lookupRoute(htonl(*v4addrp))) {
+			dns_parser_copy(&qc->ecs_parser, &p0);
+			qc->is_china_domain = 1;
+			break;
+		}
+	}
+
+check_flush:
+	if (qc->is_china_domain && qc->ecs_parser.head.question) {
+		dns_parser_copy(&p0, &qc->ecs_parser);
+
+		p0.question[0] = qc->parser.question[0];
+		memmove(p0.answer + 1, p0.answer, sizeof(p0.answer[0]) * p0.head.answer);
+
+		res = &p0.answer[0];
+		res->domain = add_domain(&p0, qc->parser.question[0].domain);
+		res->type   = NSTYPE_CNAME;
+		res->klass  = NSCLASS_INET;
+		res->ttl    = 3600;
+		*(const char **)res->value  = add_domain(&p0, qc->parser.question[1].domain);
+		p0.head.answer++;
+
+		p0.head.addon = 0;
+		p0.head.ident = qc->parser.head.ident;
+		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
+	}
+
+	if (qc->is_nonchina_domain && qc->def_parser.head.question && qc->ecs_parser.head.question) {
+		struct dns_question *que;
+		dns_parser_copy(&p0, &qc->def_parser);
+
+		que = &p0.question[0];
+		p0.question[0] = qc->parser.question[0];
+
+		int nanswer = 0;
+		for (i = 0; i < p0.head.answer; i++) {
+			res = &p0.answer[i];
+			if (que->type == res->type) {
+				res->domain = que->domain;
+				p0.answer[nanswer++] = *res;
+			}
+		}
+		p0.head.answer = nanswer;
+
+		p0.head.ident = qc->parser.head.ident;
+		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
+	}
+
+	LOG_DEBUG("%s is_nonchina_domain %d is_china_domain %d question ecs=%d def=%d",
+			qc->parser.question[1].domain,
+			qc->is_nonchina_domain, qc->is_china_domain, 
+			qc->ecs_parser.head.question, qc->def_parser.head.question);
+	return 0;
+}
+
+int main(int argc, char *argv[])
+{
+	int retval;
+	int outfd, sockfd;
+	struct sockaddr_in myaddr;
+	struct sockaddr * paddr = (struct sockaddr *)&myaddr;
+
+	struct sockaddr_in6 myaddr6;
+	struct sockaddr * paddr6 = (struct sockaddr *)&myaddr6;
+
+	outfd = socket(AF_INET, SOCK_DGRAM, 0);
+	assert(outfd != -1);
+
+	myaddr.sin_family = AF_INET;
+	myaddr.sin_port   = 0;
+	myaddr.sin_addr.s_addr = INADDR_ANY;
+	retval = bind(outfd, paddr, sizeof(myaddr));
+	assert(retval != -1);
+
+	sockfd = socket(AF_INET6, SOCK_DGRAM, 0);
+	assert(sockfd != -1);
+
+	myaddr6.sin6_family = AF_INET6;
+	myaddr6.sin6_port   = htons(53);
+	myaddr6.sin6_addr   = in6addr_any;
+	retval = bind(sockfd, paddr6, sizeof(myaddr6));
+	assert(retval != -1);
+
+	int count;
+	char buf[2048];
+	fd_set readfds = {};
+	socklen_t addrl = 0;
+	struct sockaddr_in dnsaddr;
+
+	struct dns_context c0 = {
+		.outfd = outfd,
+		.sockfd = sockfd,
+		.dnslen  = sizeof(dnsaddr),
+	};
+
+	dnsaddr.sin_family = AF_INET;
+	dnsaddr.sin_port   = htons(53);
+	dnsaddr.sin_addr.s_addr = inet_addr("8.8.8.8");
+	// dnsaddr.sin_addr.s_addr = inet_addr("223.5.5.5");
+
+	c0.dnsaddr = (struct sockaddr *)&dnsaddr;
+	LOG_DEBUG("nsaddr %p pointer %p %d", c0.dnsaddr, &dnsaddr, htons(dnsaddr.sin_port));
+
+	const struct sockaddr_in *inp = (const struct sockaddr_in *)&dnsaddr;
+	LOG_DEBUG("dns_build bytes %d %d %d %s", 0, inp->sin_family, htons(inp->sin_port), inet_ntoa(inp->sin_addr));
+
+	do {
+		FD_ZERO(&readfds);
+		FD_SET(outfd, &readfds);
+		FD_SET(sockfd, &readfds);
+
+		retval = select(sockfd + 1, &readfds, 0, 0, 0);
+		if (retval == -1) {
+			LOG_DEBUG("select failure: %s", strerror(errno));
+			break;
+		}
+
+		if (FD_ISSET(outfd, &readfds)) {
+			LOG_DEBUG("outfd is readable");
+			addrl = sizeof(myaddr);
+			count = recvfrom(outfd, buf, sizeof(buf), 0, paddr, &addrl);
+			assert(count > 0);
+			do_dns_backward(&c0, buf, count, &myaddr);
+		}
+
+		if (FD_ISSET(sockfd, &readfds)) {
+			LOG_DEBUG("sockfd is readable");
+			addrl = sizeof(myaddr6);
+			count = recvfrom(sockfd, buf, sizeof(buf), 0, paddr6, &addrl);
+			assert(count > 0);
+			do_dns_forward(&c0, buf, count, &myaddr6);
+		}
+
+	} while (retval >= 0);
+
+	close(sockfd);
+	close(outfd);
+
+	return 0;
+}

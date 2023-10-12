@@ -210,6 +210,22 @@ static int hold_to_answer(struct dns_resource *res, size_t count, int is_china_d
     for (i = 0; i < count; i++) {
         f = res + i;
 
+		switch (f->type) {
+			case NSTYPE_CNAME:
+			case NSTYPE_DNAME:
+			case NSTYPE_NS:
+			case NSTYPE_A:
+			case NSTYPE_MX:
+			case NSTYPE_AAAA:
+			case NSTYPE_SOA:
+			case NSTYPE_SRV:
+			case NSTYPE_PTR:
+				break;
+
+			default:
+				continue;
+		}
+
         int found = 0;
         for (j = 0; j < nanswer; j++) {
             t = &answsers[j];
@@ -450,6 +466,34 @@ static int dns_query_append(struct query_context_t *qc, struct dns_resource *ans
 	return 0;
 }
 
+struct dns_soa {
+    const char *name_server;
+    const char *admin_email;
+    uint32_t serial;
+    uint32_t day2;
+    uint32_t day3;
+    uint32_t day4;
+    uint32_t day5;
+};
+
+static struct dns_soa _tpl_soa = {
+	.name_server = "jeff.ns.cloudflare.com",
+	.admin_email = "dns.cloudflare.com",
+    .serial = 2322497393,
+    .day2 = 10000,
+    .day3 = 2400,
+    .day4 = 604800,
+    .day5 = 1800
+};
+
+static struct dns_resource _soa = {
+	.type = NSTYPE_SOA,
+	.klass = NSCLASS_INET,
+	.ttl = 3600,
+	.len = 30,
+	.domain = "cootail.com",
+};
+
 static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, struct dns_resource *answer, size_t count, int author)
 {
 	int i, len, slen;
@@ -461,6 +505,7 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 	p->head.answer = 0;
 	p->head.author = 0;
 
+	memcpy(_soa.value, &_tpl_soa, sizeof(_tpl_soa));
 	const char *lastdn = NULL;
 	if (p->head.question > 1) {
 
@@ -520,6 +565,27 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 	}
 #endif
 
+	int found = 0;
+	int type = p->question[0].type;
+
+	for (i = 0; found == 0 && i < p->head.answer; i++) {
+		found = (type == p->answer[i].type);
+	}
+
+#define NSFLAG_AA    0x0400
+
+	for (i = 0; found == 0 && i < p->head.author; i++) {
+		found = (NSTYPE_SOA == p->author[i].type);
+		if (found) {
+			p->author[i] = _soa;
+			p->head.flags |= NSFLAG_AA;
+		}
+	}
+
+	if (found == 0) {
+		p->author[p->head.author++] = _soa;
+		p->head.flags |= NSFLAG_AA;
+	}
 
 	len = dns_build(p, buf, sizeof(buf));
 	if (len == -1) 
@@ -862,7 +928,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 		LOG_DEBUG("Q [%d] %s %d", 0, que->domain, que->type);
 		const char *domain = que->domain;
 		size_t dolen = strlen(domain);
-		const char SUFFIXIES[] = ".z.855899.xyz";
+		const char SUFFIXIES[] = ".cootail.com";
 
 		LOG_DEBUG("domain %s %s %d %d", domain, domain + dolen + 1 - sizeof(SUFFIXIES), dolen, sizeof(SUFFIXIES));
 		if (dolen > sizeof(SUFFIXIES) &&
@@ -875,6 +941,36 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 			qc->parser.head.question++;
 			que = &qc->parser.question[1];
 			_domain[dolen + 1 - sizeof(SUFFIXIES)] = 0;
+
+			char *dot0 = _domain, *dot1 = _domain;
+			for (int j = 0; _domain[j]; j++) {
+				if (_domain[j] == '.') {
+					dot0 = dot1;
+					dot1 = _domain + j + 1;
+				}
+			}
+
+			/* www.google.com -> www.oogleg.moc */
+			/* www.oogleg.moc -> www.google.com */
+			if (dot1 && dot0 && dot0 + 1 < dot1) {
+				int len1 = strlen(dot1);
+				for (int j = 0; (j << 1) < len1; j++) {
+					char t = dot1[len1 - j - 1];
+					dot1[len1 - j - 1] = dot1[j];
+					dot1[j] = t;
+				}
+
+				char shift = dot0[0];
+				for (int j = 1; dot0[j] != '.'; j++) {
+					char t = dot0[j];
+					dot0[j] = shift;
+					shift = t;
+				}
+				dot0[0] = shift;
+
+				LOG_DEBUG("domain is _domain %s", _domain);
+			}
+
 			LOG_DEBUG("_domain %s", _domain);
 			que->domain = add_domain(&qc->parser, _domain);
 		}

@@ -1595,6 +1595,7 @@ void mytrust_callback(struct cached_client *client, dns_udp_context_t *up)
 
 	if (_is_client && SUFFIXES_LEN > 0) dns_rewrap(parser, SUFFIXES, 0);
 	// if (!_my_location_is_oversea) add_client_subnet(client, *parser, optbuf);
+	 add_client_subnet(client, *parser, optbuf);
 
 	len = dns_build(parser, bufward, sizeof(bufward));
 	if (len <= 0) {

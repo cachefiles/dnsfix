@@ -591,20 +591,59 @@ static const char *cache_add_domain(const char *domain)
 	return self;
 }
 
+struct dns_mx {
+	uint16_t prio;
+	const char *server;
+} __attribute__((packed));
+
+struct dns_soa {
+	const char *server;
+	const char *email;
+} __attribute__((packed));
+
+struct dns_srv {
+	uint16_t prio;
+	uint16_t weight;
+	uint16_t key;
+	const char *server;
+} __attribute__((packed));
+
 int move_to_cache(struct dns_resource *ress, size_t count)
 {
 	int i;
 	const char ** server;
 	struct dns_resource *res;
 
+	struct dns_mx *mx;
+	struct dns_srv *srv;
+	struct dns_soa *soa;
+
 	for (i = 0; i < count; i++) {
 		res = &ress[i];
 		res->domain = cache_add_domain(res->domain);
 		switch (res->type) {
 			case NSTYPE_CNAME:
+			case NSTYPE_DNAME:
+			case NSTYPE_PTR:
 			case NSTYPE_NS:
 				server = (const char **)res->value;
 				*server = cache_add_domain(*server);
+				break;
+
+			case NSTYPE_MX:
+				mx = (struct dns_mx *)res->value;
+				mx->server = cache_add_domain(mx->server);
+				break;
+
+			case NSTYPE_SOA:
+				soa = (struct dns_soa *)res->value;
+				soa->server = cache_add_domain(soa->server);
+				soa->email = cache_add_domain(soa->email);
+				break;
+
+			case NSTYPE_SRV:
+				srv = (struct dns_srv *)res->value;
+				srv->server = cache_add_domain(srv->server);
 				break;
 
 			default:

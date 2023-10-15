@@ -147,7 +147,7 @@ static int dns_rewrap(struct dns_parser *p1)
 	if (cc == 0 || dns_contains(optp)) {
 		for (; *optp && optp < limit; optp++) {
 			char t = *optp;
-			*optp++ = *limit;
+			*optp = *limit;
 			*limit-- = t;
 		}
 
@@ -224,14 +224,17 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 
 	dns_parser_copy(&qc->parser, &p0);
 	p1 = &qc->parser;
+#if 0
 	if (dns_rewrap(p1) == -1) {
 		LOG_DEBUG("FROM: %s this is not good", p1->question[0].domain);
 		return -1;
 	}
 	p0.question[0] = p1->question[1];
+#else
+	p1->question[1] = p1->question[0];
+	p0.question[0] = p1->question[1];
+#endif
 
-	int save_opt = p0.head.addon;
-	p0.head.addon = 0;
 	p0.head.flags |= NSFLAG_RD;
 	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
 	if (retval == -1) {
@@ -332,7 +335,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		}
 
 		const char *alias = *(const char **)res->value;
-		LOG_DEBUG("domain %s %s %s", res->domain, pp->question[0].domain, pp->question[1].domain);
+		LOG_DEBUG("domain %s %s %s %s", res->domain, pp->question[0].domain, pp->question[1].domain, alias);
 		if (strcasecmp(res->domain, pp->question[1].domain) == 0 &&
 				strcasecmp(alias, pp->question[0].domain) == 0) {
 			memmove(p0.answer, p0.answer + 1, sizeof(p0.answer[0]) * (p0.head.answer - i -1));
@@ -342,6 +345,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		}
 	}
 
+#if 0
 	if (found == 0) {
 		memmove(p0.answer + 1, p0.answer, sizeof(p0.answer[0]) * p0.head.answer);
 		res = &p0.answer[0];
@@ -352,7 +356,9 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		*(const char **)res->value  = add_domain(&p0, qc->parser.question[1].domain);
 		p0.head.answer++;
 	}
+#endif
 
+#if 0
 	for (i = 0; i < p0.head.answer; i++) {
 		res = &p0.answer[i];
 		if (res->type != NSTYPE_A) {
@@ -361,9 +367,12 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		uint32_t *v4addrp = (uint32_t *)res->value;
 		setup_route(htonl(*v4addrp));
 	}
+#endif
 
-	p0.head.addon = 0;
+	// p0.head.addon = 0;
 	p0.head.ident = qc->parser.head.ident;
+	char buf0[256];
+	LOG_DEBUG("dns_sendto %s:%d", inet_ntop(AF_INET6, &qc->from.sin6_addr, buf0, sizeof(buf0)), htons(qc->from.sin6_port));
 	dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 
 	return 0;
@@ -394,8 +403,10 @@ int main(int argc, char *argv[])
 	myaddr6.sin6_family = AF_INET6;
 	myaddr6.sin6_port   = htons(53);
 	myaddr6.sin6_addr   = in6addr_any;
+#if 0
 	myaddr6.sin6_addr   = in6addr_loopback;
 	inet_pton(AF_INET6, "2409:8a1e:9464:1160:8639:beff:fe67:d576", &myaddr6.sin6_addr);
+#endif
 	retval = bind(sockfd, paddr6, sizeof(myaddr6));
 	assert(retval != -1);
 

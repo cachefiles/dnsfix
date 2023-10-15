@@ -38,6 +38,7 @@ struct dns_context {
 
 	socklen_t dnslen;
 	struct sockaddr *dnsaddr;
+	struct sockaddr *ecsaddr;
 };
 
 struct dns_query_context {
@@ -92,8 +93,8 @@ static int contains_subnet(struct dns_parser *p0)
 static int add_client_subnet(struct dns_parser *p0, uint8_t *optbuf)
 {
 #ifndef DISABLE_SUBNET
-	// china mobile 223.104.213.0/24
-	const static char subnet_data[] = "\x00\x08\x00\x07\x00\x01\x18\x00\xdf\x68\xd5";
+	// china mobile 117.143.102.0/24
+	const static char subnet_data[] = "\x00\x08\x00\x07\x00\x01\x18\x00\x75\x8f\x66";
 
 #define subnet_len (sizeof(subnet_data) - 1)
 
@@ -125,15 +126,17 @@ static int add_client_subnet(struct dns_parser *p0, uint8_t *optbuf)
 					memcpy(optbuf + (hold - valp0) + len, subnet_data, subnet_len);
 					*(void **)res->value = optbuf;
 					res->len = len + (hold - valp0) + subnet_len;
-					have_edns = 0;
+					have_edns = 1;
 					break;
 				}
 			}
 
 			if (have_edns == 0) {
 				const uint8_t * valp = *(const uint8_t **)res->value;
-				memcpy(optbuf, valp, res->len);
-				memcpy(optbuf + res->len, subnet_data, subnet_len);
+
+				memcpy(optbuf, subnet_data, subnet_len);
+				memcpy(optbuf + subnet_len, valp, res->len);
+
 				*(void **)res->value = optbuf;
 				res->len += subnet_len;
 			}
@@ -232,12 +235,14 @@ static int dns_unwrap(struct dns_parser *p1)
 	}
 
 	if (cc == 0 || dns_contains(optp)) {
+		LOG_DEBUG("o %s %s %s", title, optp, limit);
 		for (; *optp && optp < limit; optp++) {
 			char t = *optp;
-			*optp++ = *limit;
+			*optp = *limit;
 			*limit-- = t;
 		}
 
+		LOG_DEBUG("o %s", title);
 		if (ndot < 1) {
 			LOG_DEBUG("dns_unwrap ork %s", title);
 			que1->domain = add_domain(p1, title);
@@ -331,7 +336,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	add_client_subnet(&p0, optbuf);
 	
 	p0.head.ident += 0x1000;
-	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
+	retval = dns_sendto(ctx->outfd, &p0, ctx->ecsaddr, ctx->dnslen);
 	if (retval == -1) {
 		LOG_DEBUG("dns_sendto failure");
 		return 0;
@@ -392,12 +397,58 @@ static int dump_resource(const char *title, struct dns_resource *res)
 	return 0;
 }
 
+int dns_answer_diff(struct dns_parser *p1, struct dns_parser *p2)
+{
+	int i, j = 0;
+	int type = p1->question[0].type;
+	struct dns_resource *f, *t;
+
+	for (i = 0; i < p1->head.answer; i++) {
+		f = &p1->answer[i];
+		if (f->type != type) {
+			continue;
+		}
+
+		while (j < p2->head.answer &&
+				p2->answer[j].type != type) {
+			j++;
+		}
+
+		if (j >= p2->head.answer) {
+			return 1;
+		}
+
+		t = &p2->answer[j++];
+		switch(type) {
+			case NSTYPE_A:
+				if (memcmp(t->value, f->value, 3)) return 1;
+				break;
+
+			case NSTYPE_AAAA:
+				if (memcmp(t->value, f->value, 8)) return 1;
+				break;
+
+			default:
+				break;
+		}
+	}
+
+	while (j < p2->head.answer) {
+		t = &p2->answer[j++];
+		if (t->type == type) return 1;
+		j++;
+	}
+	
+	return 1;
+}
+
 int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in *from)
 {
 	struct dns_parser p0;
 	struct dns_parser *pp;
 	struct dns_resource *res;
 
+	LOG_DEBUG("count %d", count);
 	pp = dns_parse(&p0, buf, count);
 	if (pp == NULL) {
 		LOG_DEBUG("do_dns_backward parse failure");
@@ -517,15 +568,26 @@ check_flush:
 		que = &p0.question[0];
 		p0.question[0] = qc->parser.question[0];
 
-		int nanswer = 0;
-		for (i = 0; i < p0.head.answer; i++) {
-			res = &p0.answer[i];
-			if (que->type == res->type) {
-				res->domain = que->domain;
-				p0.answer[nanswer++] = *res;
+		if (dns_answer_diff(&qc->def_parser, &qc->ecs_parser) == 0) {
+			for (i = 0; i < p0.head.answer; i++) {
+				res = &p0.answer[i];
+				if (strcasecmp(res->domain, qc->parser.question[1].domain) == 0) {
+					res->domain = add_domain(&p0, qc->parser.question[0].domain);
+				}
 			}
+			LOG_DEBUG("no diff ");
+		} else {
+			int nanswer = 0;
+			for (i = 0; i < p0.head.answer; i++) {
+				res = &p0.answer[i];
+				if (que->type == res->type) {
+					res->domain = que->domain;
+					p0.answer[nanswer++] = *res;
+				}
+			}
+			p0.head.answer = nanswer;
+			LOG_DEBUG("diff ");
 		}
-		p0.head.answer = nanswer;
 
 		p0.head.ident = qc->parser.head.ident;
 		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
@@ -571,6 +633,7 @@ int main(int argc, char *argv[])
 	fd_set readfds = {};
 	socklen_t addrl = 0;
 	struct sockaddr_in dnsaddr;
+	struct sockaddr_in ecsaddr;
 
 	struct dns_context c0 = {
 		.outfd = outfd,
@@ -578,12 +641,19 @@ int main(int argc, char *argv[])
 		.dnslen  = sizeof(dnsaddr),
 	};
 
+	setenv("NAMESERVER", "8.8.8.8", 0);
+	setenv("ECS_SERVER", "8.8.8.8", 0);
+
 	dnsaddr.sin_family = AF_INET;
 	dnsaddr.sin_port   = htons(53);
-	dnsaddr.sin_addr.s_addr = inet_addr("8.8.8.8");
-	// dnsaddr.sin_addr.s_addr = inet_addr("223.5.5.5");
+	dnsaddr.sin_addr.s_addr = inet_addr(getenv("NAMESERVER"));
+
+	ecsaddr.sin_family = AF_INET;
+	ecsaddr.sin_port   = htons(53);
+	ecsaddr.sin_addr.s_addr = inet_addr(getenv("ECS_SERVER"));
 
 	c0.dnsaddr = (struct sockaddr *)&dnsaddr;
+	c0.ecsaddr = (struct sockaddr *)&ecsaddr;
 	LOG_DEBUG("nsaddr %p pointer %p %d", c0.dnsaddr, &dnsaddr, htons(dnsaddr.sin_port));
 
 	const struct sockaddr_in *inp = (const struct sockaddr_in *)&dnsaddr;

@@ -551,9 +551,15 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 
 static int nstrtab = 0;
 static char *pstrtab[10240];
-static char _dummy = 0;
 static char _strbuf[1024 * 1024];
-static char *lastsym = _strbuf;
+static char *lastsym = _strbuf + 1;
+
+extern int cache_verify(const void *ptr)
+{
+	assert(ptr >= _strbuf);
+	assert(ptr < lastsym);
+	return 0;
+}
 
 static int cache_bound(const char *domain, int *lowp, int *highp)
 {
@@ -590,7 +596,8 @@ const char *cache_get_name(const char *domain)
 	int index = -1;
 
 	if (*domain == 0) {
-		return &_dummy;
+		fprintf(stderr, "start %p end %p\n", _strbuf, _strbuf + sizeof(_strbuf));
+		return _strbuf;
 	} else {
 		index = cache_bound(domain, NULL, NULL);
 	}
@@ -605,27 +612,27 @@ static const char *cache_add_domain(const char *domain)
 	char *limit = _strbuf + sizeof(_strbuf);
 
 	if (*domain == 0) {
-		fprintf(stderr, "cache_add_domain: dummy\n");
-		return &_dummy;
+		fprintf(stderr, "dummy\n");
+		return _strbuf;
 	}
 
 	if (cache_bound(domain, &low, &high) != -1) {
 		return pstrtab[(low + high) >> 1];
 	}
 
-	if (lastsym == limit || nstrtab >= 10240) {
+	if (lastsym >= limit || nstrtab >= 10240) {
 		assert(0);
 		return NULL;
 	}
 
 	n = snprintf(lastsym, limit - lastsym, "%s", domain);
 	self = lastsym;
-	lastsym += (n + 1);
+	lastsym = &lastsym[n + 1];
 
 	memmove(pstrtab + high + 2, pstrtab + high + 1, (nstrtab - high - 1) * sizeof(char *));
 	pstrtab[high + 1] = self;
-	nstrtab++;
 
+	nstrtab++;
 	return self;
 }
 

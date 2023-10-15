@@ -33,6 +33,8 @@ struct uptick_task {
 	unsigned int last_ticks;
 };
 
+extern "C" int cache_verify(const void *ptr);
+
 static void update_tick(void *up)
 {
 	struct uptick_task *uptick;
@@ -229,6 +231,11 @@ static int answer_cache_lookup(const char *domain, int type, struct dns_resource
 	int more, count = 0;
 	const char *dn = cache_get_name(domain);
 
+	if (dn == NULL) {
+		LOG_DEBUG("domain not found: %s", domain);
+		return 0;
+	}
+
 	count = answer_cache_lookup_once(dn, type, results, size);
 	if (count > 0 || type == NSTYPE_CNAME) {
 		return count;
@@ -386,7 +393,7 @@ static int hold_to_answer(struct dns_resource *res, size_t count, int is_china_d
 }
 
 
-static int nauthor;
+static int nauthor = 0;
 static struct dns_resource authors[1024];
 
 struct query_context_t {
@@ -493,6 +500,7 @@ do_resolved:
 		assert (namesever != NULL);
 		newcount = answer_cache_lookup(namesever, NSTYPE_A, results + count, size - count);
 		if (newcount > 0) {
+			assert(results[count].type != NSTYPE_CNAME);
 			count += newcount;
 			res->ttl = 0;
 			continue;
@@ -523,18 +531,23 @@ static int hold_to_author(struct dns_resource *res, size_t count)
 
     cache_put(res, count);
 
-	void *lastptr[256] = {};
 	for (i = 0; i < count; i++) {
         f = res + i;
 
 		found = 0;
 		for (j = 0; j < nauthor && found == 0; j++) {
 			t = &authors[j];
-			if (t->type == f->type) {
+			if (t->type == f->type && f->domain == t->domain) {
+				cache_verify(f->domain);
+				cache_verify(t->domain);
 				switch(t->type) {
 					case NSTYPE_CNAME:
 					case NSTYPE_NS:
+						cache_verify(*(char **)f->value);
+						cache_verify(*(char **)t->value);
 						found = !memcmp(f->value, t->value, sizeof(void*));
+						if (found) LOG_DEBUG("ns: %d %s:/%s/=/%s/ %d %p-%p", f->type, f->domain,
+								*(char **)t->value, *(char **)f->value, j, *(char **)t->value, *(char **)f->value);
 						break;
 
 					case NSTYPE_A:
@@ -547,12 +560,19 @@ static int hold_to_author(struct dns_resource *res, size_t count)
 			}
 		}
 
-		if (found == 0) {
-			if (f->type == NSTYPE_CNAME)
-				authors[nauthor ++] = *f;
+		if (f->type == NSTYPE_CNAME || f->type == NSTYPE_NS)
+			LOG_DEBUG("memcmp found=%d %d %s %s", found, f->type, f->domain, *(char **)f->value);
 
-			if (f->type == NSTYPE_NS)
+		if (found == 0) {
+			if (f->type == NSTYPE_CNAME) {
+				cache_verify(*(char **)f->value);
 				authors[nauthor ++] = *f;
+			}
+
+			if (f->type == NSTYPE_NS) {
+				cache_verify(*(char **)f->value);
+				authors[nauthor ++] = *f;
+			}
 
 			if (f->type == NSTYPE_A)
 				authors[nauthor ++] = *f;
@@ -686,18 +706,23 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 			res = &answer[i];
 			if (res->type != NSTYPE_CNAME)
 				p->answer[p->head.answer++] = answer[i];
+#if 0
 			if (lastdn && strcasecmp(res->domain, lastdn) == 0) {
 				res->domain = p->question[0].domain;
 			}
+#endif
 		}
 	} else {
 		struct dns_resource *res;
+
 		for (i = 0; i < count; i++) {
 			res = &p->author[p->head.author];
 			p->author[p->head.author++] = answer[i];
+#if 0
 			if (lastdn && strcasecmp(res->domain, lastdn) == 0) {
 				res->domain = p->question[0].domain;
 			}
+#endif
 		}
 	}
 
@@ -831,8 +856,16 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 		res = &authors[i];
 		if (res->type != NSTYPE_NS) continue;
 
-		if (res->domain && strlen(res->domain) > maxns && 
-				strstr(que->domain, res->domain)) {
+		LOG_DEBUG("try add ns %s=%s %s %d", res->domain, *(char **)res->value, que->domain, maxns);
+		const char *left = que->domain;
+		const char *right = res->domain;
+		assert(left && right);
+
+		int leftlen = strlen(left);
+		int domainlen = strlen(right);
+
+		if (res->domain && domainlen > maxns && 
+				0 == strcmp(left + leftlen - domainlen, right)) {
 		    LOG_DEBUG("add ns %s %s %d", res->domain, que->domain, maxns);
 			qc->worker[newns++] = *res;
 		}
@@ -850,10 +883,11 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 			continue;
 		}
 
-		char *nsname = *(char **)res->value;
+		const char *nameserver = *(const char **)res->value;
+
 		for (int j = 0; j < nanswer; j++) {
 			kes = &answer[j];
-			if (kes->type == NSTYPE_A && strcasecmp(nsname, kes->domain) == 0) {
+			if (kes->type == NSTYPE_A && nameserver == kes->domain) {
 		        LOG_DEBUG("add v4 %s %s", res->domain, kes->domain);
 
 				int target = *(int *)kes->value;
@@ -875,7 +909,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 
 		for (int j = 0; j < nauthor; j++) {
 			kes = &authors[j];
-			if (kes->type == NSTYPE_A && strcasecmp(nsname, kes->domain) == 0) {
+			if (kes->type == NSTYPE_A && nameserver == kes->domain) {
 		        LOG_DEBUG("add v4 %s %s", res->domain, kes->domain);
 
 				int target = *(int *)kes->value;
@@ -1227,7 +1261,7 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
 		return 0;
 	}
 
-	qc->is_china_domain |= is_china_domain;
+	// qc->is_china_domain |= is_china_domain;
 	dns_query_continue(up, qc, que);
 	return 0;
 }

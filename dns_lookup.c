@@ -109,7 +109,7 @@ static int hold_to_cache(struct dns_resource *res, size_t count)
 	int i, j;
 	struct dns_resource *f, *t;
 
-	move_to_cache(res, count);
+	cache_put(res, count);
 
 	for (i = 0; i < count; i++) {
 		f = res + i;

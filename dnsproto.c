@@ -64,7 +64,7 @@ static const char * rsrc_verify_signature[256] = {
 
 #define ARRAY_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
 
-const char *add_value(struct dns_parser *parser, const void *dn, size_t len)
+void *add_value(struct dns_parser *parser, const void *dn, size_t len)
 {
 	int i;
 	int l;
@@ -551,32 +551,66 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 
 static int nstrtab = 0;
 static char *pstrtab[10240];
+static char _dummy = 0;
 static char _strbuf[1024 * 1024];
 static char *lastsym = _strbuf;
 
-#if 0
-static char *cache_lookup_domain(const char *domain)
+static int cache_bound(const char *domain, int *lowp, int *highp)
 {
-	int i;
+	int cmp = 1, mid = -1;
+	int low = 0, high = nstrtab -1;
 
-	for (i = 0; i < nstrtab; i++) {
-		if (strcasecmp(domain, pstrtab[i]) == 0)
-			return pstrtab[i];
+	while (low <= high) {
+		mid = (low + high) >> 1;
+
+		cmp = strcasecmp(pstrtab[mid], domain);
+		if (cmp == 0)
+			break;
+
+		if (cmp > 0) {
+			high = mid - 1;
+		} else if (cmp < 0) {
+			low = mid + 1;
+		} else {
+			assert(0);
+		}
 	}
 
-	return NULL;
+	if (highp) 
+		*highp = high;
+
+	if (lowp)
+		*lowp = low;
+
+	return cmp == 0? mid: -1;
 }
-#endif
+
+const char *cache_get_name(const char *domain)
+{
+	int index = -1;
+
+	if (*domain == 0) {
+		return &_dummy;
+	} else {
+		index = cache_bound(domain, NULL, NULL);
+	}
+
+	return (index != -1)?  pstrtab[index]: NULL;
+}
 
 static const char *cache_add_domain(const char *domain)
 {
-	int i, n;
+	int low, high, n;
 	char *self = NULL;
 	char *limit = _strbuf + sizeof(_strbuf);
 
-	for (i = 0; i < nstrtab; i++) {
-		if (strcasecmp(domain, pstrtab[i]) == 0)
-			return pstrtab[i];
+	if (*domain == 0) {
+		fprintf(stderr, "cache_add_domain: dummy\n");
+		return &_dummy;
+	}
+
+	if (cache_bound(domain, &low, &high) != -1) {
+		return pstrtab[(low + high) >> 1];
 	}
 
 	if (lastsym == limit || nstrtab >= 10240) {
@@ -585,8 +619,12 @@ static const char *cache_add_domain(const char *domain)
 	}
 
 	n = snprintf(lastsym, limit - lastsym, "%s", domain);
-	pstrtab[nstrtab++] = self = lastsym;
+	self = lastsym;
 	lastsym += (n + 1);
+
+	memmove(pstrtab + high + 2, pstrtab + high + 1, (nstrtab - high - 1) * sizeof(char *));
+	pstrtab[high + 1] = self;
+	nstrtab++;
 
 	return self;
 }
@@ -608,7 +646,7 @@ struct dns_srv {
 	const char *server;
 } __attribute__((packed));
 
-int move_to_cache(struct dns_resource *ress, size_t count)
+int cache_put(struct dns_resource *ress, size_t count)
 {
 	int i;
 	const char ** server;

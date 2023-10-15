@@ -89,7 +89,8 @@ extern "C" {
 
 int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len);
 const char *add_domain(struct dns_parser *parser, const char *dn);
-int move_to_cache(struct dns_resource *res, size_t count);
+const char *cache_get_name(const char *domain);
+int cache_put(struct dns_resource *res, size_t count);
 struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, size_t len);
 
 #ifdef __cplusplus 

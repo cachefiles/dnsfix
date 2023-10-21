@@ -41,6 +41,19 @@
 #define MAX_RECORD_COUNT 32
 // #define DN_EXPANDED 0x8000
 
+#define NSFLAG_QR    0x8000
+#define NSFLAG_AA    0x0400     
+#define NSFLAG_TC    0x0200     
+#define NSFLAG_RD    0x0100
+#define NSFLAG_RA    0x0080
+#define NSFLAG_ZERO  0x0070
+#define NSFLAG_RCODE 0x000F
+                
+#define RCODE_NXDOMAIN 3
+#define RCODE_SERVFAIL 2
+#define RCODE_REFUSED  5        
+#define NSCLASS_INET 0x01
+
 struct dns_header {
 	uint16_t ident;
 	uint16_t flags;

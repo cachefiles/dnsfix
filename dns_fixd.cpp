@@ -546,8 +546,6 @@ static int hold_to_author(struct dns_resource *res, size_t count)
 						cache_verify(*(char **)f->value);
 						cache_verify(*(char **)t->value);
 						found = !memcmp(f->value, t->value, sizeof(void*));
-						if (found) LOG_DEBUG("ns: %d %s:/%s/=/%s/ %d %p-%p", f->type, f->domain,
-								*(char **)t->value, *(char **)f->value, j, *(char **)t->value, *(char **)f->value);
 						break;
 
 					case NSTYPE_A:
@@ -559,9 +557,6 @@ static int hold_to_author(struct dns_resource *res, size_t count)
 				}
 			}
 		}
-
-		if (f->type == NSTYPE_CNAME || f->type == NSTYPE_NS)
-			LOG_DEBUG("memcmp found=%d %d %s %s", found, f->type, f->domain, *(char **)f->value);
 
 		if (found == 0) {
 			if (f->type == NSTYPE_CNAME) {
@@ -691,7 +686,11 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 		}
 #endif
 
+		if (p->head.answer >= p->head.question)
+			p->head.answer = p->head.question -1;
 		p->head.question = 1;
+	} else {
+		p->head.answer = 0;
 	}
 
 	if (p->head.answer > 0 && !qc->is_china_domain) {
@@ -704,7 +703,7 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 		struct dns_resource *res;
 		for (i = 0; i < count; i++) {
 			res = &answer[i];
-			if (res->type != NSTYPE_CNAME)
+			// if (res->type != NSTYPE_CNAME)
 				p->answer[p->head.answer++] = answer[i];
 #if 0
 			if (lastdn && strcasecmp(res->domain, lastdn) == 0) {
@@ -856,7 +855,6 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 		res = &authors[i];
 		if (res->type != NSTYPE_NS) continue;
 
-		LOG_DEBUG("try add ns %s=%s %s %d", res->domain, *(char **)res->value, que->domain, maxns);
 		const char *left = que->domain;
 		const char *right = res->domain;
 		assert(left && right);
@@ -931,6 +929,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 		return 0;
 	}
 
+	int parallel = 2;
 	while (qc->iworker >= 0) {
 		res = &qc->worker[qc->iworker];
 		qc->iworker--;
@@ -942,14 +941,16 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 				do_fetch_resource(up, qc->parser.head.ident, que, (struct in_addr *)res->value, res->domain);
 				LOG_DEBUG("NSTYPE_A: %s %s\n", res->domain, inet_ntoa(*(struct in_addr*)res->value));
 				res->ttl = 0;
-				return 0;
+				if (parallel-- <= 0) return 0;
+				break;
 
 			case NSTYPE_NS:
 				LOG_DEBUG("NSTYPE_NS: %s %s\n", res->domain, *(char **)res->value);
 				do_lookup_nameserver(up, qc, *(char **)res->value);
 				qc->refcnt ++;
 				res->ttl = 0;
-				return 0;
+				if (parallel-- <= 0) return 0;
+				break;
 
 			default:
 				assert(0);
@@ -1027,6 +1028,8 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 
 	qc->nworker = count;
 	qc->iworker = count - 1;
+
+	int parallel = 2;
 	while (qc->iworker >= 0) {
 		res = &qc->worker[qc->iworker];
 		qc->iworker--;
@@ -1038,12 +1041,14 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 				do_fetch_resource(up, qc->parser.head.ident, que, (struct in_addr *)res->value, res->domain);
 				LOG_DEBUG("NSTYPE_A: (0) %s %s\n", res->domain, inet_ntoa(*(struct in_addr*)res->value));
 				res->ttl = 0;
+				if (parallel-- <= 0) return 0;
 				return 0;
 
 			case NSTYPE_NS:
 				do_lookup_nameserver(up, qc, *(char **)res->value);
 				qc->refcnt ++;
 				res->ttl = 0;
+				if (parallel-- <= 0) return 0;
 				return 0;
 
 			default:
@@ -1189,6 +1194,17 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
         LOG_DEBUG("FROM: %s this is not answer", inet_ntoa(in_addr1->sin_addr));
 		return -1;
 	}
+
+	if (p->head.addon == 0 && p->head.answer == 1) {
+		if (p->answer[0].type == NSTYPE_A && (p->answer[0].ttl %  60)) {
+			LOG_DEBUG("FROM: %s this is not author", inet_ntoa(in_addr1->sin_addr));
+			return -1;
+		} else if (p->answer[0].type == NSTYPE_AAAA && (p->answer[0].ttl % 60)) {
+			LOG_DEBUG("FROM: %s this is not author", inet_ntoa(in_addr1->sin_addr));
+			return -1;
+		}
+	}
+
 
 	for (i = 0; i < p->head.answer; i++) {
 		res = &p->answer[i];

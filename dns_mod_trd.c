@@ -29,6 +29,100 @@
 #define closesocket close
 #endif
 
+struct dns_resource _predefine_resource_record[] = {
+	{
+		.type = NSTYPE_SOA,
+		.klass = NSCLASS_INET,
+		.ttl = 86400,
+		.len = 4,
+		.flags = 0,
+		.domain = "_dummy",
+		.value = {110, 42, 145, 164}},
+	{
+		.type = NSTYPE_NS,
+		.klass = NSCLASS_INET,
+		.ttl = 86400,
+		.len = 8,
+		.flags = 0,
+		.domain = "_dummy",
+		.value = {110, 42, 145, 164}},
+	{
+		.type = NSTYPE_A,
+		.klass = NSCLASS_INET,
+		.ttl = 360,
+		.len = 4,
+		.flags = 0,
+		.domain = "cdn.855899.xyz",
+		.value = {54, 192, 17, 115}},
+	{
+		.type = NSTYPE_A,
+		.klass = NSCLASS_INET,
+		.ttl = 360,
+		.len = 4,
+		.flags = 0,
+		.domain = "cdn.855899.xyz",
+		.value = {172, 67, 165, 145}},
+	{
+		.type = NSTYPE_A,
+		.klass = NSCLASS_INET,
+		.ttl = 36000,
+		.len = 4,
+		.flags = 0,
+		.domain = "mtalk.oogleg.moc.cootail.com",
+		.value = {10, 0, 3, 1}},
+	{
+		.type = NSTYPE_A,
+		.klass = NSCLASS_INET,
+		.ttl = 36000,
+		.len = 4,
+		.flags = 0,
+		.domain = "mtalk.google.com",
+		.value = {10, 0, 3, 1}},
+	{
+		.type = NSTYPE_A,
+		.klass = NSCLASS_INET,
+		.ttl = 36000,
+		.len = 4,
+		.flags = 0,
+		.domain = "alt1-mtalk.google.com",
+		.value = {110, 42, 145, 164}},
+};
+
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof(*array))
+
+int fetch_predefine_resource_record(struct dns_parser *parser)
+{
+	int found = 0;
+	struct dns_resource *res;
+	struct dns_question *que = &parser->question[0];
+	size_t domain_plen = strlen(que->domain);
+
+	for (int i = 0; i < ARRAY_SIZE(_predefine_resource_record); i++) {
+
+		if (MAX_RECORD_COUNT <= parser->head.answer) {
+			break;
+		}
+
+		res = &_predefine_resource_record[i];
+		if ((res->type == que->type) && strcasecmp(res->domain, que->domain) == 0) {
+			int index = parser->head.answer++;
+			parser->answer[index].type = res->type;
+			parser->answer[index].klass = res->klass;
+			parser->answer[index].flags = res->flags;
+			parser->answer[index].ttl   = res->ttl;
+			memcpy(parser->answer[index].value, res->value, sizeof(res->value));
+			parser->answer[index].domain = add_domain(parser, que->domain);
+		}
+
+		if (/* res->type == NSTYPE_ANY &&*/ strcasecmp(que->domain, res->domain) == 0) {
+			found = 1;
+		}
+	}
+
+	return (parser->head.answer > 0) || (found == 1);
+}
+
+
 #define NSCLASS_INET 0x01
 #define NSFLAG_RD    0x0100
 
@@ -209,10 +303,17 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 		return 0;
 	}
 
-    if (p0.head.flags & 0x8000) {
-        LOG_DEBUG("FROM: %s this is not query", "nothing");
-        return -1;
-    }
+	if (p0.head.flags & 0x8000) {
+		LOG_DEBUG("FROM: %s this is not query", "nothing");
+		return -1;
+	}
+	
+	if (fetch_predefine_resource_record(&p0)) {
+		LOG_DEBUG("prefetch: %s", p0.question[0].domain);
+		p0.head.flags |= NSFLAG_QR;
+		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+		return 0;
+	}
 	
 	int retval = 0;
 	int offset = (p0.head.ident & 0xfff);
@@ -224,7 +325,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 
 	dns_parser_copy(&qc->parser, &p0);
 	p1 = &qc->parser;
-#if 0
+#if 1
 	if (dns_rewrap(p1) == -1) {
 		LOG_DEBUG("FROM: %s this is not good", p1->question[0].domain);
 		return -1;
@@ -345,7 +446,6 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		}
 	}
 
-#if 0
 	if (found == 0) {
 		memmove(p0.answer + 1, p0.answer, sizeof(p0.answer[0]) * p0.head.answer);
 		res = &p0.answer[0];
@@ -356,9 +456,8 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		*(const char **)res->value  = add_domain(&p0, qc->parser.question[1].domain);
 		p0.head.answer++;
 	}
-#endif
 
-#if 0
+#if 1
 	for (i = 0; i < p0.head.answer; i++) {
 		res = &p0.answer[i];
 		if (res->type != NSTYPE_A) {
@@ -402,9 +501,9 @@ int main(int argc, char *argv[])
 
 	myaddr6.sin6_family = AF_INET6;
 	myaddr6.sin6_port   = htons(53);
-	myaddr6.sin6_addr   = in6addr_any;
-#if 0
 	myaddr6.sin6_addr   = in6addr_loopback;
+#if 0
+	myaddr6.sin6_addr   = in6addr_any;
 	inet_pton(AF_INET6, "2409:8a1e:9464:1160:8639:beff:fe67:d576", &myaddr6.sin6_addr);
 #endif
 	retval = bind(sockfd, paddr6, sizeof(myaddr6));

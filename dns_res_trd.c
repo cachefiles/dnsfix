@@ -399,11 +399,12 @@ static int dump_resource(const char *title, struct dns_resource *res)
 
 int dns_answer_diff(struct dns_parser *p1, struct dns_parser *p2)
 {
-	int i, j = 0;
-	int type = p1->question[0].type;
+	int i, j = 0, d = 0;
+	int type = NSTYPE_CNAME;
 	struct dns_resource *f, *t;
 
-	for (i = 0; i < p1->head.answer; i++) {
+	int ncname = 0;
+	for (i = 0; i < p1->head.answer && d == 0; i++) {
 		f = &p1->answer[i];
 		if (f->type != type) {
 			continue;
@@ -419,27 +420,18 @@ int dns_answer_diff(struct dns_parser *p1, struct dns_parser *p2)
 		}
 
 		t = &p2->answer[j++];
-		switch(type) {
-			case NSTYPE_A:
-				if (memcmp(t->value, f->value, 3)) return 1;
-				break;
-
-			case NSTYPE_AAAA:
-				if (memcmp(t->value, f->value, 8)) return 1;
-				break;
-
-			default:
-				break;
-		}
+		d = !!strcasecmp(*(const char **)f->value, *(const char **)t->value);
+		LOG_DEBUG("alias: %s %s %d %d", *(const char **)f->value, *(const char **)t->value, ncname, d);
+		ncname ++;
 	}
 
-	while (j < p2->head.answer) {
+	while (j < p2->head.answer && d == 0) {
 		t = &p2->answer[j++];
 		if (t->type == type) return 1;
 		j++;
 	}
 	
-	return 1;
+	return d || ncname < 2;
 }
 
 int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in *from)
@@ -575,7 +567,7 @@ check_flush:
 					res->domain = add_domain(&p0, qc->parser.question[0].domain);
 				}
 			}
-			LOG_DEBUG("no diff ");
+			LOG_DEBUG("ecs is ko, will return cname");
 		} else {
 			int nanswer = 0;
 			for (i = 0; i < p0.head.answer; i++) {
@@ -586,7 +578,7 @@ check_flush:
 				}
 			}
 			p0.head.answer = nanswer;
-			LOG_DEBUG("diff ");
+			LOG_DEBUG("ecs is ok, do not return cname");
 		}
 
 		p0.head.ident = qc->parser.head.ident;

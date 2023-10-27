@@ -197,6 +197,9 @@ static int dns_unwrap(struct dns_parser *p1)
 	char *dots[8], title[256];
 
 	LOG_DEBUG("suffixes: %s", que->domain);
+	if (que->domain == NULL) {
+		return -1;
+	}
 
 	title[sizeof(title) -1] = 0;
 	strncpy(title, que->domain, sizeof(title) -1);
@@ -455,6 +458,11 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	int i;
 	int offset = (p0.head.ident & 0xfff);
 	struct dns_query_context *qc = &_orig_list[offset];
+
+	if (p0.question[0].type == NSTYPE_PTR) {
+		p0.head.flags &= ~NSFLAG_RCODE;
+		qc->is_china_domain = 1;
+	}
 
 	if (strcmp(qc->parser.question[1].domain, p0.question[0].domain)) {
 		struct dns_parser p1 = {};

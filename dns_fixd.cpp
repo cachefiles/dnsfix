@@ -606,8 +606,9 @@ static int do_fetch_resource(dns_udp_context_t *up, int ident, struct dns_questi
 
 static int dns_query_append(struct query_context_t *qc, struct dns_resource *answer, size_t count)
 {
-	int i, is_china_domain = 0;
-	struct dns_resource *res;
+	int found;
+	int i, j, is_china_domain = 0;
+	struct dns_resource *res, *kes;
 
 	for (i = 0; i < count; i++) {
 		res = answer + i;
@@ -619,8 +620,21 @@ static int dns_query_append(struct query_context_t *qc, struct dns_resource *ans
 			// is_china_domain = 1;
         }
 
-		qc->worker[qc->nworker++] = *res;
-		qc->iworker = qc->nworker - 1;
+		found = 0;
+		assert(qc->nworker < ARRAY_SIZE(qc->worker));
+		for (j = 0; j < qc->nworker; j++) {
+			kes = &qc->worker[j];
+			if (kes->type == res->type &&
+					strcasecmp(kes->domain, res->domain) == 0) {
+				found = 1;
+				break;
+			}
+		}
+
+		if (found == 0) {
+			qc->worker[qc->nworker++] = *res;
+			qc->iworker = qc->nworker - 1;
+		}
 	}
 
 	// qc->is_china_domain |= is_china_domain;
@@ -759,6 +773,7 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 	}
 
 	if (found == 0) {
+		assert(p->head.author < ARRAY_SIZE(p->author));
 		p->author[p->head.author++] = _soa;
 		p->head.flags |= NSFLAG_AA;
 	}
@@ -796,7 +811,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 {
 	struct dns_resource *res = NULL;
 	struct dns_resource *kes = NULL;
-	struct dns_resource answer[256];
+	struct dns_resource answer[256] = {};
 
 	int count = answer_cache_lookup(que->domain, que->type, answer, 256);
 	if (count > 0 || qc->is_china_domain) {
@@ -865,6 +880,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 		if (res->domain && domainlen > maxns && 
 				0 == strcmp(left + leftlen - domainlen, right)) {
 		    LOG_DEBUG("add ns %s %s %d", res->domain, que->domain, maxns);
+			assert(newns < ARRAY_SIZE(qc->worker));
 			qc->worker[newns++] = *res;
 		}
 	}
@@ -881,10 +897,14 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 			continue;
 		}
 
+		if (res->ttl == 0) {
+			continue;
+		}
+
 		const char *nameserver = *(const char **)res->value;
 
 		for (int j = 0; j < nanswer; j++) {
-			kes = &answer[j];
+			kes = &answsers[j];
 			if (kes->type == NSTYPE_A && nameserver == kes->domain) {
 		        LOG_DEBUG("add v4 %s %s", res->domain, kes->domain);
 
@@ -894,6 +914,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 					// qc->is_china_domain = 1;
 				}
 
+				assert(qc->nworker < ARRAY_SIZE(qc->worker));
 				qc->worker[qc->nworker] = *kes;
 				qc->iworker = qc->nworker;
 				qc->nworker ++;
@@ -916,6 +937,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 					// qc->is_china_domain = 1;
 				}
 
+				assert(qc->nworker < ARRAY_SIZE(qc->worker));
 				qc->worker[qc->nworker] = *kes;
 				qc->iworker = qc->nworker;
 				qc->nworker ++;
@@ -1027,6 +1049,7 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 #endif
 
 	qc->nworker = count;
+	assert(qc->nworker < ARRAY_SIZE(qc->worker));
 	qc->iworker = count - 1;
 
 	int parallel = 2;

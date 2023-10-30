@@ -4,7 +4,8 @@
 #include <stdint.h>
 
 typedef struct subnet_s {
-	uint32_t network;
+	uint64_t network;
+	uint32_t keep;
 	uint16_t zero;
 	uint8_t  flags;
 	uint8_t  prefixlen;
@@ -17,5 +18,6 @@ extern subnet_t _net_list[];
 extern "C"
 #endif
 subnet_t * lookupRoute(unsigned ip);
+subnet_t * lookupRoute6(uint64_t v6ip);
 
 #endif

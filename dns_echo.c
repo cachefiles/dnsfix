@@ -14,8 +14,7 @@
 #include <netinet/in.h>
 #include <arpa/nameser.h>
 #include <resolv.h>
-
-#define LOG_DEBUG(fmt, args...) fprintf(stderr, fmt"\n", ##args)
+#include "tx_debug.h"
 
 #ifdef WIN32
 #include <windows.h>
@@ -39,9 +38,33 @@ struct dns_context {
     struct sockaddr_in6 last6[0xffff];
 };
 
+#define NSFLAG_QR    0x8000
+#define NSFLAG_AA    0x0400
+#define NSFLAG_TC    0x0200
+#define NSFLAG_RD    0x0100
+#define NSFLAG_RA    0x0080
+#define NSFLAG_ZERO  0x0070
+#define NSFLAG_RCODE 0x000F
+
+#define RCODE_NXDOMAIN 3
+#define RCODE_SERVFAIL 2
+#define RCODE_REFUSED  5
+#define NSCLASS_INET 0x01
+
+struct dns_header {
+    uint16_t ident;
+    uint16_t flags;
+    uint16_t question;
+    uint16_t answer;
+    uint16_t author;
+    uint16_t addon;
+};
+
 int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
 {
 	uint16_t ident;
+	struct dns_header *h = (struct dns_header *)buf;
+	h->flags |= htons(NSFLAG_RD);
 
 	memcpy(&ident, buf, sizeof(ident));
 	memcpy(&ctx->last6[ident], from, sizeof(*from));
@@ -54,7 +77,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 
 	len = sendto(ctx->outfd, buf, count, 0, ctx->dnsaddr, ctx->dnslen);
 
-	LOG_DEBUG("forward: [%s]:%d %d %d", inet_ntop(AF_INET6, &from->sin6_addr, tmp, 216),
+	LOG_DEBUG("%04x forward: [%s]:%d %d %d", ident, inet_ntop(AF_INET6, &from->sin6_addr, tmp, 216),
 			htons(from->sin6_port), count, len);
 
 	struct sockaddr_in6 *to = (struct sockaddr_in6 *)ctx->dnsaddr;
@@ -71,7 +94,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 #define ADDR(s) (s->sin6_family == AF_INET6? &s->sin6_addr: &((struct sockaddr_in *)s)->sin_addr)
 
-	LOG_DEBUG("backward: af=%d/%d [%s]:%d %d", from->sin6_family, AF_INET6,
+	LOG_DEBUG("%04x backward: af=%d/%d [%s]:%d %d", ident, from->sin6_family, AF_INET6,
 			inet_ntop(from->sin6_family, ADDR(from), tmp, 216), htons(from->sin6_port), count);
 
 	ctx->last = &ctx->last6[ident];

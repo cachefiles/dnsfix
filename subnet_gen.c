@@ -10,26 +10,48 @@
 
 int _net_count = 0;
 subnet_t _net_list[25600];
+static int _family = AF_INET;
 
-int includeNetwork(uint32_t network, uint8_t prefix)
+uint64_t pton_val(const char *addr)
+{
+	uint64_t val = 0;
+	uint32_t data[4];
+
+	inet_pton(_family, addr, data);
+
+	if (_family == AF_INET) {
+		val = htonl(data[0]);
+		return val << 32;
+	}
+
+	if (_family == AF_INET6) {
+		val = htonl(data[0]);
+		return (val << 32) | htonl(data[1]);
+	}
+
+	return val;
+}
+
+int includeNetwork(uint64_t network, uint8_t prefix)
 {
 	int i, j = 0;
 	/* super, exclude, subset, merge */
-	uint32_t mask = (~0u >> prefix);
+	uint64_t mask = (~0ull >> prefix);
 
 	/* step1: subset check */
 	for (i = 0; i < _net_count; i++) {
 		subnet_t snet = _net_list[i];
-		uint32_t smask = (~0u >> snet.prefixlen);
+		uint64_t smask = (~0ull >> snet.prefixlen);
 
 		if (snet.prefixlen <= prefix &&
-				snet.network == (~smask & network))
+				snet.network == (~smask & network)) {
 			return 0;
+		}
 	}
 
 	/* step2: merge */
-    uint32_t test, ksam, scale = 0;
-	subnet_t nnet = {network & ~mask, 0, 0, prefix};
+    uint64_t test, ksam, scale = 0;
+	subnet_t nnet = {.network = network & ~mask, .prefixlen = prefix};
 
     for (i = 0; i < _net_count; i++) {
         subnet_t snet = _net_list[i];
@@ -37,20 +59,20 @@ int includeNetwork(uint32_t network, uint8_t prefix)
         if (snet.prefixlen > nnet.prefixlen)
             continue;
 
-		ksam = (~0u >> snet.prefixlen);
+		ksam = (~0ull >> snet.prefixlen);
         test = snet.network ^ (nnet.network & ~ksam);
 
 		if (test == ksam + 1)
 			scale |= test;
     }
 
-	scale >>= (32 - nnet.prefixlen);
+	scale >>= (64 - nnet.prefixlen);
 	while (nnet.prefixlen > 0 && (scale & 1)) {
 		nnet.prefixlen--;
 		scale >>= 1;
 	}
 
-	mask = (~0u >> nnet.prefixlen);
+	mask = (~0ull >> nnet.prefixlen);
 	nnet.network &= ~mask;
 
 	/* step3: super check */
@@ -69,17 +91,17 @@ int includeNetwork(uint32_t network, uint8_t prefix)
 	return 0;
 }
 
-int excludeNetwork(uint32_t network, uint8_t prefixlen)
+int excludeNetwork(uint64_t network, uint8_t prefixlen)
 {
 	int i, j = 0, n = 0;
-	uint32_t net1, msk1, newnet;
-	uint32_t net0, msk0 = (~0u >> prefixlen);
+	uint64_t net1, msk1, newnet;
+	uint64_t net0, msk0 = (~0ull >> prefixlen);
 
 	for (i = 0; i < _net_count; i++) {
 		int pref = _net_list[i].prefixlen;
 
 		if (pref <= prefixlen) {
-			msk1 = (~0u >> pref);
+			msk1 = (~0ull >> pref);
 			net0 = (network & ~msk1);
 
 			if (_net_list[i].network == net0) {
@@ -90,7 +112,7 @@ int excludeNetwork(uint32_t network, uint8_t prefixlen)
 				_net_count = j;
 
 				for (int k = pref + 1; k <= prefixlen; k++) {
-					msk1   = (~0u >> k);
+					msk1   = (~0ull >> k);
 					newnet = network & ~msk1;
 					includeNetwork(newnet ^ (msk1 + 1), (int)k);
 				}
@@ -115,6 +137,65 @@ int excludeNetwork(uint32_t network, uint8_t prefixlen)
 }
 
 #define COUNTOF(list) (sizeof(list)/sizeof(*list))
+void initRoute6(const char *tag)
+{
+	char * _include[] = {"2000::/3"};
+	char * _internal[] = {""};
+
+	char *_exclude[] = {"2002::/16"};
+	/* prebuilt: NONE INTERNAL EXTERNAL */
+
+	int prefixlen;
+	uint64_t network;
+	char sNetwork[128];
+
+	_net_count = 0;
+	for (int i = 0; i < COUNTOF(_include); i++) {
+		int nmatch = sscanf(_include[i], "%128[0-9.:]/%d%*s", sNetwork, &prefixlen);
+
+		if (nmatch != 2) {
+			fprintf(stderr, "match: %d %s\n", nmatch, _include[i]);
+			continue;
+		}
+
+		if (prefixlen > 48) {
+		    int save = prefixlen;
+			int origin = prefixlen;
+			prefixlen = 32;
+			while (save > 1) {
+				prefixlen--;
+				save >>= 1;
+			}
+		}
+
+		network = pton_val(sNetwork);
+		includeNetwork(network, prefixlen);
+	}
+
+	for (int i = 0; i < COUNTOF(_exclude); i++) {
+		int nmatch = sscanf(_exclude[i], "%128[0-9.:]/%d%*s", sNetwork, &prefixlen);
+
+		if (nmatch != 2) {
+			continue;
+		}
+
+		if (prefixlen > 48) {
+		    int save = prefixlen;
+			int origin = prefixlen;
+			prefixlen = 32;
+			while (save > 1) {
+				prefixlen--;
+				save >>= 1;
+			}
+		}
+
+		network = pton_val(sNetwork);
+		excludeNetwork(network, prefixlen);
+	}
+
+	return;
+}
+
 void initRoute(const char *tag)
 {
 	char * _include[] = {"0.0.0.0/1", "128.0.0.0/2", "192.0.0.0/3"};
@@ -124,41 +205,41 @@ void initRoute(const char *tag)
 	/* prebuilt: NONE INTERNAL EXTERNAL */
 
 	int prefixlen;
-	unsigned network;
+	uint64_t network;
 	char sNetwork[128];
 
 	_net_count = 0;
 	for (int i = 0; i < COUNTOF(_include); i++) {
-		int nmatch = sscanf(_include[i], "%128[0-9.]/%d%*s", sNetwork, &prefixlen);
+		int nmatch = sscanf(_include[i], "%128[0-9a-f.:]/%d%*s", sNetwork, &prefixlen);
 
 		if (nmatch != 2) {
 			fprintf(stderr, "match: %d %s\n", nmatch, _include[i]);
 			continue;
 		}
 
-		network = inet_addr(sNetwork);
-		includeNetwork(htonl(network), prefixlen);
+		network = pton_val(sNetwork);
+		includeNetwork(network, prefixlen);
 	}
 
 	for (int i = 0; i < COUNTOF(_exclude); i++) {
-		int nmatch = sscanf(_exclude[i], "%128[0-9.]/%d%*s", sNetwork, &prefixlen);
+		int nmatch = sscanf(_exclude[i], "%128[0-9a-f.:]/%d%*s", sNetwork, &prefixlen);
 
 		if (nmatch != 2) {
 			continue;
 		}
 
-		network = inet_addr(sNetwork);
-		excludeNetwork(htonl(network), prefixlen);
+		network = pton_val(sNetwork);
+		excludeNetwork(network, prefixlen);
 	}
 
 	return;
 }
 
-void loadRoute(const char *path, int (*callback)(uint32_t , uint8_t))
+void loadRoute(const char *path, int (*callback)(uint64_t , uint8_t))
 {
 
 	int prefixlen;
-	uint32_t network;
+	uint64_t network;
 	char sNetwork[128];
 
 	FILE *fp = fopen(path, "r");
@@ -170,9 +251,19 @@ void loadRoute(const char *path, int (*callback)(uint32_t , uint8_t))
     while (fgets(line, sizeof(line) -1, fp) != NULL) {
         int nmatch = sscanf(line, "%123[^/]/%d", sNetwork, &prefixlen);
 
+		if (prefixlen > 48) {
+		    int save = prefixlen;
+			int origin = prefixlen;
+			prefixlen = 32;
+			while (save > 1) {
+				prefixlen--;
+				save >>= 1;
+			}
+		}
+
         if (nmatch == 2) {
-            network = inet_addr(sNetwork);
-            (*callback)(htonl(network), prefixlen);
+            network = pton_val(sNetwork);
+            (*callback)(network, prefixlen);
         } else {
             // fscanf(fp, "%s", sNetwork);
             fprintf(stderr, "break nmatch %d %s\n", nmatch, sNetwork);
@@ -204,7 +295,7 @@ static void dumpRoute(void)
 	for (int i = 0; i < _net_count; i++) {
 		int slim = (i & 0x03);
 		fprintf(stdout, "%s", slim? " ": "\n    ");
-		fprintf(stdout, "{0x%08x, 0, 0, %2d}%s", _net_list[i].network,
+		fprintf(stdout, "{0x%08llx, 0, 0, %2d}%s", _net_list[i].network,
 				_net_list[i].prefixlen, (i + 1 == _net_count? "\n": ","));
 	}
 	fprintf(stdout, "};\n");
@@ -212,16 +303,14 @@ static void dumpRoute(void)
 	return;
 }
 
-int queryRoute(uint32_t ipv4)
+int queryRoute(uint64_t ipv4, char *sTarget)
 {
-    char sTarget[128], sNetwork[128];
+    char sNetwork[128];
 
-    uint32_t target = ntohl(ipv4);
+    uint64_t target = (ipv4);
     subnet_t *subnet = lookupRoute(target);
 
-    inet_ntop(AF_INET, &ipv4, sTarget, sizeof(sTarget));
-
-	uint32_t last_network = 0;
+	uint64_t last_network = 0;
 	for (int i = 0; i < _net_count; i++) {
 		// fprintf(stderr, "%08x/%d\n", _net_list[i].network, _net_list[i].prefixlen);
 		assert(last_network < _net_list[i].network || last_network == 0);
@@ -229,9 +318,9 @@ int queryRoute(uint32_t ipv4)
 	}
 
     if (subnet != 0) {
-        unsigned network = htonl(subnet->network);
+        uint64_t network = (subnet->network);
 
-        inet_ntop(AF_INET, &network, sNetwork, sizeof(sNetwork));
+        inet_ntop(_family, &network, sNetwork, sizeof(sNetwork));
         fprintf(stderr, "ACTIVE network: %s/%d by %s\n", sNetwork, subnet->prefixlen, sTarget);
 	}
 
@@ -260,6 +349,18 @@ int main(int argc, char *argv[])
         }
 
         if (i + 1 < argc &&
+                strcmp(argv[i], "-6") == 0) {
+			_family = AF_INET6;
+            continue;
+        }
+
+        if (i + 1 < argc &&
+                strcmp(argv[i], "-4") == 0) {
+			_family = AF_INET;
+            continue;
+        }
+
+        if (i + 1 < argc &&
                 strcmp(argv[i], "-e") == 0) {
             skip = 1;
             loadRoute(argv[i + skip], excludeNetwork);
@@ -269,7 +370,10 @@ int main(int argc, char *argv[])
         if (i + 1 < argc &&
                 strcmp(argv[i], "-t") == 0) {
             skip = 1;
-            initRoute(argv[i + skip]);
+			if (_family == AF_INET) 
+				initRoute(argv[i + skip]);
+			else if (_family == AF_INET6) 
+				initRoute6(argv[i + skip]);
             continue;
         }
 
@@ -280,12 +384,17 @@ int main(int argc, char *argv[])
                 qsort(_net_list, _net_count, sizeof(_net_list[0]), subnet_compare);
                 query = 1;
             }
-            queryRoute(inet_addr(argv[i + 1]));
+
+            queryRoute(pton_val(argv[i + 1]), argv[i + 1]);
             continue;
         }
 
-        if (_net_count == 0)
-            initRoute("DEFAULT");
+        if (_net_count == 0) {
+			if (_family == AF_INET) 
+				initRoute("DEFAULT");
+			else if (_family == AF_INET6) 
+				initRoute6("DEFAULT");
+		}
 
         loadRoute(argv[i], excludeNetwork);
     }

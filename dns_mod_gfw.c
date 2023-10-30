@@ -16,10 +16,9 @@
 #include <netinet/in.h>
 #include <arpa/nameser.h>
 #include <resolv.h>
+#include "tx_debug.h"
 #include "dnsproto.h"
 #include "subnet_api.h"
-
-#define LOG_DEBUG(fmt, args...) fprintf(stderr, fmt"\n", ##args)
 
 #ifdef WIN32
 #include <windows.h>
@@ -154,9 +153,7 @@ struct dns_context {
 };
 
 struct dns_query_context {
-	int is_china_domain;
-	int is_nonchina_domain;
-	char domain[256];
+	uint32_t digest;
 	struct sockaddr_in6 from;
 	struct dns_parser parser;
 };
@@ -260,18 +257,19 @@ static int dns_rewrap(struct dns_parser *p1)
 static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockaddr *to, size_t tolen)
 {
 	ssize_t len;
+	char buf[256];
 	uint8_t _hold[2048];
 
 	len = dns_build(parser, _hold, sizeof(_hold));
 
-	const struct sockaddr_in *inp = (const struct sockaddr_in *)to;
-	LOG_DEBUG("dns_build bytes %d %d %d %s %s", len, inp->sin_family,
-			htons(inp->sin_port), inet_ntoa(inp->sin_addr), parser->question[0].domain);
+	const struct sockaddr_in6 *inp = (const struct sockaddr_in6 *)to;
 
 	if (len != -1)
 		len = sendto(outfd, _hold, len, 0, to, tolen);
 
-	LOG_DEBUG("dns_sendto %d %s", len, len == -1? strerror(errno): "");
+	LOG_DEBUG("dns_sendto %d af=%d %d %s %s", len, inp->sin6_family, htons(inp->sin6_port),
+			inet_ntop(AF_INET6, &inp->sin6_addr, buf, 256), parser->question[0].domain);
+
 	return len;
 }
 
@@ -336,7 +334,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	}
 
 	const char *zone = p1->addon[0].domain;
-	LOG_DEBUG("FROM: %s to %s, zone %s", p1->question[0].domain, p1->question[1].domain, zone);
+	LOG_DEBUG("%04x: FROM: %s to %s, zone %s", p1->head.ident, p1->question[0].domain, p1->question[1].domain, zone);
 	if (zone != NULL && *p0.question[0].domain == '_') {
 		struct dns_resource *res;
 		p0.head.flags |= (RCODE_NXDOMAIN| NSFLAG_AA);
@@ -361,7 +359,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	if (zone != NULL && strcasecmp(zone, "oil.cootail.com") == 0) {
 		p0.question[0] = p1->question[1];
 		p0.head.flags &= ~NSFLAG_QR;
-		p0.head.flags |= NSFLAG_RD;
+		p0.head.flags &= ~NSFLAG_RD;
 		p0.head.flags &= ~NSFLAG_RCODE;
 		p0.head.question = 1;
 		p0.head.answer = 0;
@@ -374,19 +372,14 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 		p0.addon[0].len = 0;
 		p0.head.addon = 1;
 
-		struct sockaddr_in6 do0;
-		do0.sin6_family = AF_INET6;
-		do0.sin6_port   = htons(53);
-		inet_pton(AF_INET6, "2408:4009:501::2", &do0.sin6_addr);
-
-		LOG_DEBUG("dns_sendto in do_dns_forward");
-		retval = dns_sendto(ctx->outfd, &p0, &do0, sizeof(do0));
+		retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
 		if (retval == -1) {
 			LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
 			return 0;
 		}
 
 		*qc1 = qc0;
+		qc1->digest = 0;
 		dns_parser_copy(&qc1->parser, &qc0.parser);
 	}
 
@@ -418,6 +411,28 @@ static int dump_resource(const char *title, struct dns_resource *res)
 	return 0;
 }
 
+static uint32_t get_check_sum(void *buf, size_t count)
+{
+	uint32_t cksum = 0;
+	uint32_t *dataptr = (uint32_t*)buf;
+	uint32_t flags = *dataptr;
+
+#define NSFLAG_AA    0x0400
+#define NSFLAG_RD    0x0100
+#define NSFLAG_RA    0x0080
+
+	flags &= ~htonl(NSFLAG_AA|NSFLAG_RD|NSFLAG_RA);
+
+	LOG_DEBUG("flags=%08x %08x", flags, *dataptr);
+	while (count >= 4) {
+		cksum += flags;
+		count -= 4;
+		flags  = *++dataptr;
+	}
+	
+	return cksum;
+}
+
 int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
 {
 	int i;
@@ -438,36 +453,40 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	}
 #endif
 	
+	char name[256];
 	int offset = (p0.head.ident & 0xfff);
 	struct dns_query_context *qc = &_orig_list[offset];
 
 	pp = &qc->parser;
 	if (pp->head.ident != p0.head.ident || pp->head.question != 2) {
-		char buf[256];
-		LOG_DEBUG("FROM: %s unexpected response", inet_ntop(AF_INET6, &from->sin6_addr, buf, sizeof(buf)));
+		LOG_DEBUG("FROM: %s XX unexpected response", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)));
 		return -1;
 	}
 
+	uint32_t digest = get_check_sum(buf, 6 * 2);
+	if (digest != qc->digest && qc->digest != 0) {
+		LOG_DEBUG("FROM: %s digest %08x %08x %d", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)), digest, qc->digest, count);
+		return -1;
+	}
+
+	qc->digest = digest;
 	if (p0.head.author != 0 && p0.head.answer > 0) {
-		char buf[256];
-		LOG_DEBUG("FROM: %s unexpected response", inet_ntop(AF_INET6, &from->sin6_addr, buf, sizeof(buf)));
+		LOG_DEBUG("FROM: %s %d/%d/%d unexpected response", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)), p0.head.author, p0.head.answer, p0.head.addon);
 		return -1;
 	}
 
 	if (pp->head.answer > p0.head.answer) {
-		char buf[256];
-		LOG_DEBUG("FROM: %s should not overwrite response", inet_ntop(AF_INET6, &from->sin6_addr, buf, sizeof(buf)));
+		LOG_DEBUG("FROM: %s should not overwrite response", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)));
 		return -1;
 	}
 
 	if (strcasecmp(pp->question[1].domain, p0.question[0].domain)) {
-		char buf[256];
-		LOG_DEBUG("FROM: %s should not overwrite response since question not ok", inet_ntop(AF_INET6, &from->sin6_addr, buf, sizeof(buf)));
+		LOG_DEBUG("FROM: %s should not overwrite response since question not ok", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)));
 		LOG_DEBUG("FROM: domain %s %s", pp->question[1].domain, p0.question[0].domain);
 		return -1;
 	}
 
-	LOG_DEBUG("do_dns_backward parse copy: %d %d/%d/%d/%d",
+	LOG_DEBUG("%04x do_dns_backward parse copy: %d/%d/%d/%d",
 			p0.head.ident, p0.head.question, p0.head.answer, p0.head.author, p0.head.addon);
 
 	p0.question[0] = pp->question[0];
@@ -482,9 +501,11 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 			p0.answer[i].ttl = 7200;
 			if (p0.head.addon) {
 				if (p0.answer[i].type == NSTYPE_A)
-					memset(p0.answer[0].value, 127, 4);
+					memset(p0.answer[i].value, 127, 4);
 				if (p0.answer[i].type == NSTYPE_AAAA)
-					memset(p0.answer[0].value, 0xfe, 16);
+					memset(p0.answer[i].value, 0xfe, 16);
+				if (p0.answer[i].type == NSTYPE_CNAME)
+					*(char **)p0.answer[i].value = "chinazone.cootail.com";
 			}
 		}
 	} else if (p0.question[0].type == NSTYPE_AAAA
@@ -496,17 +517,18 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 			memset(p0.answer[0].value, 127, 4);
 		if (p0.question[0].type == NSTYPE_AAAA)
 			memset(p0.answer[0].value, 0xfe, 16);
+		p0.head.flags |= NSFLAG_AA;
 		p0.head.answer = 1;
 	}
 
 	for (i = 0; i < p0.head.author; i++) {
 		if (p0.author[i].type == NSTYPE_SOA) {
-			p0.author[0].domain = "oil.cootail.com";
+			p0.author[i].domain = "oil.cootail.com";
+			p0.author[i].ttl = 7200;
 		}
 	}
 
 	dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
-	memset(qc, 0, sizeof(*qc));
 	return 0;
 }
 
@@ -520,7 +542,7 @@ int main(int argc, char *argv[])
 	struct sockaddr_in6 myaddr6;
 	struct sockaddr * paddr1 = (struct sockaddr *)&myaddr6;
 
-	setenv("NAMESERVER", "8.8.8.8", 0);
+	setenv("NAMESERVER", "2408:4009:501::2", 0);
 	setenv("LOCALADDR6", "2001:470:a:38d::2", 0);
 
 	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
@@ -554,16 +576,15 @@ int main(int argc, char *argv[])
 		.dnslen  = sizeof(dnsaddr),
 	};
 
-	dnsaddr.sin6_family = AF_INET;
+	dnsaddr.sin6_family = AF_INET6;
 	dnsaddr.sin6_port   = htons(53);
-	// dnsaddr.sin6_addr.s_addr = inet_addr(getenv("NAMESERVER"));
-	// dnsaddr.sin_addr.s_addr = inet_addr("223.5.5.5");
+	inet_pton(AF_INET6, getenv("NAMESERVER"), &dnsaddr.sin6_addr);
 
 	c0.dnsaddr = (struct sockaddr *)&dnsaddr;
 	LOG_DEBUG("nsaddr %p pointer %p %d", c0.dnsaddr, &dnsaddr, htons(dnsaddr.sin6_port));
 
-	const struct sockaddr_in *inp = (const struct sockaddr_in *)&dnsaddr;
-	LOG_DEBUG("dns_build bytes %d %d %d %s", 0, inp->sin_family, htons(inp->sin_port), inet_ntoa(inp->sin_addr));
+	const struct sockaddr_in6 *inp = (const struct sockaddr_in *)&dnsaddr;
+	LOG_DEBUG("dns_build af=%d port=%d %s", inp->sin6_family, htons(inp->sin6_port), inet_ntop(AF_INET6, &inp->sin6_addr, buf, sizeof(buf)));
 
 	_predefine_resource_record[0].domain = "oil.cootail.com";
 	_predefine_resource_record[0].type   = NSTYPE_NS;
@@ -585,18 +606,17 @@ int main(int argc, char *argv[])
 		}
 
 		if (FD_ISSET(outfd, &readfds)) {
-			LOG_DEBUG("outfd is readable");
 			addrl = sizeof(myaddr);
 			count = recvfrom(outfd, buf, sizeof(buf), 0, paddr, &addrl);
+			count > 0 || LOG_DEBUG("outfd is readable count=%d", count);
 			assert(count > 0);
-			LOG_DEBUG("outfd is readable count=%d", count);
 			do_dns_backward(&c0, buf, count, &myaddr);
 		}
 
 		if (FD_ISSET(sockfd, &readfds)) {
-			LOG_DEBUG("sockfd is readable");
 			addrl = sizeof(myaddr);
 			count = recvfrom(sockfd, buf, sizeof(buf), 0, paddr1, &addrl);
+			count > 0 || LOG_DEBUG("sockfd is readable: %d", count);
 			assert(count > 0);
 			do_dns_forward(&c0, buf, count, &myaddr6);
 		}

@@ -35,7 +35,7 @@ VPATH := $(THIS_PATH)/libtx:$(THIS_PATH)
 LOCAL_TARGETS = dnsfix dns_lookup dnsfixd
 
 .PHONY: all
-all: $(LOCAL_TARGETS) stunc dns_res_trd dns_mod_trd dns_mod_gfw udp_echo
+all: $(LOCAL_TARGETS) stunc dns_res_trd dns_mod_trd dns_mod_gfw dns_echo
 CFLAGS := $(LOCAL_CFLAGS)
 CXXFLAGS := $(LOCAL_CXXFLAGS)
 
@@ -46,10 +46,10 @@ OBJECTS := ncatutil.o txrelay.o txdnsxy.o txconfig.o base64.o dnsproto.o router.
 dns_mod_trd: dns_mod_trd.o dnsproto.o subnet_api.o subnet_data.o
 	$(CC) $(LDFLAGS) -o $@ $^ -lresolv
 
-dns_mod_gfw: dns_mod_gfw.o subnet_api.o subnet_data.o dnsproto.o
-	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS) -static
+dns_mod_gfw: dns_mod_gfw.o subnet_api.o subnet_data.o dnsproto.o tx_debug.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-udp_echo: udp_echo.o
+dns_echo: dns_echo.o tx_debug.o
 	$(CC) $(LDFLAGS) -o $@ $^ -lresolv
 
 dns_res_trd: dns_res_trd.o dnsproto.o subnet_api.o subnet_data.o

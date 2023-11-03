@@ -20,12 +20,10 @@
 #endif
 
 #include "txall.h"
-#include "txdnsxy.h"
 #include "dnsproto.h"
 #include "subnet_api.h"
 
 #include <txall.h>
-#include "txconfig.h"
 
 struct uptick_task {
 	int ticks;
@@ -97,6 +95,25 @@ void query_finish(void *context)
 
 }
 
+static char addrbuf[128];
+#define ntop6(addr) inet_ntop(AF_INET6, &addr, addrbuf, sizeof(addrbuf))
+
+static const char *inet_4to6(void *v6ptr, const void *v4ptr)
+{
+    uint8_t *v4 = (uint8_t *)v4ptr;
+    uint8_t *v6 = (uint8_t *)v6ptr;
+
+    memset(v6, 0, 10);
+    v6[10] = 0xff;
+    v6[11] = 0xff;
+
+    v6[12] = v4[0];
+    v6[13] = v4[1];
+    v6[14] = v4[2];
+    v6[15] = v4[3];
+    return "";
+}
+
 struct root_server {
     char domain[32];
     int ttl;
@@ -120,7 +137,6 @@ static struct root_server _root_servers[]= {
 };
 
 #define ARRAY_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
-#define NSCLASS_INET 1
 
 static struct dns_resource _tpl0 =  {
 	.type = NSTYPE_A,
@@ -399,7 +415,7 @@ static struct dns_resource authors[1024];
 struct query_context_t {
 	int refcnt;
 	int is_china_domain;
-	struct sockaddr_in from;
+	struct sockaddr_in6 from;
 	struct dns_question que;
 	struct dns_parser parser;
 
@@ -577,11 +593,11 @@ static int hold_to_author(struct dns_resource *res, size_t count)
 	return 0;
 }
 
-static int do_fetch_resource(dns_udp_context_t *up, int ident, struct dns_question *que, struct in_addr *server, const char *server_name)
+static int do_fetch_resource(dns_udp_context_t *up, int ident, struct dns_question *que, struct in6_addr *server, const char *server_name)
 {
 	uint8_t buf[2048];
 	struct dns_parser p0 = {};
-	struct sockaddr_in target = {};
+	struct sockaddr_in6 target = {};
 
 	p0.head.question = 1;
 	p0.head.ident  = ident;
@@ -596,12 +612,13 @@ static int do_fetch_resource(dns_udp_context_t *up, int ident, struct dns_questi
 
 	size_t len = dns_build(&p0, buf, sizeof(buf));
 
-	target.sin_family = AF_INET;
-	target.sin_port   = htons(53);
-	target.sin_addr   = *server;
+	target.sin6_family = AF_INET6;
+	target.sin6_port   = htons(53);
+	memcpy(&target.sin6_addr, server, 12);
 
+	// inet_4to6(&target.sin6_addr, server);
 	size_t slen = sendto(up->outfd, buf, len, 0, (struct sockaddr *)&target, sizeof(target));
-	LOG_DEBUG("do_fetch_resource sendto %s/%s data %d %d %s %d", server_name, inet_ntoa(*server), len, slen, que->domain, que->type);
+	LOG_DEBUG("do_fetch_resource sendto %s/%s data %d %d %s %d", server_name, ntop6(server), len, slen, que->domain, que->type);
 }
 
 static int dns_query_append(struct query_context_t *qc, struct dns_resource *answer, size_t count)
@@ -615,7 +632,7 @@ static int dns_query_append(struct query_context_t *qc, struct dns_resource *ans
 		if (res->type != NSTYPE_A) continue;
 
         int target = *(int *)res->value;
-        if (res->type == NSTYPE_A && lookupRoute(htonl(target)) == 0) {
+        if (res->type == NSTYPE_A && lookupRoute4(htonl(target)) == 0) {
             LOG_DEBUG("china domain detect");
 			// is_china_domain = 1;
         }
@@ -783,7 +800,7 @@ static int do_query_response(dns_udp_context_t *up, struct query_context_t *qc, 
 		LOG_DEBUG("dns_build failure");
 	
 	slen = sendto(up->sockfd, buf, len, 0, (struct sockaddr *)&qc->from, sizeof(qc->from));
-	LOG_DEBUG("do_query_resource sendto %d %s %s", slen, inet_ntoa(qc->from.sin_addr), p->question[0].domain);
+	LOG_DEBUG("do_query_resource sendto %d %s %s", slen, ntop6(qc->from.sin6_addr), p->question[0].domain);
 	return 0;
 }
 
@@ -909,7 +926,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 		        LOG_DEBUG("add v4 %s %s", res->domain, kes->domain);
 
 				int target = *(int *)kes->value;
-				if (kes->type == NSTYPE_A && lookupRoute(htonl(target)) == 0) {
+				if (kes->type == NSTYPE_A && lookupRoute4(htonl(target)) == 0) {
 					LOG_DEBUG("china domain detect");
 					// qc->is_china_domain = 1;
 				}
@@ -932,7 +949,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 		        LOG_DEBUG("add v4 %s %s", res->domain, kes->domain);
 
 				int target = *(int *)kes->value;
-				if (kes->type == NSTYPE_A && lookupRoute(htonl(target)) == 0) {
+				if (kes->type == NSTYPE_A && lookupRoute4(htonl(target)) == 0) {
 					LOG_DEBUG("china domain detect");
 					// qc->is_china_domain = 1;
 				}
@@ -952,6 +969,7 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 	}
 
 	int parallel = 2;
+	struct in6_addr ipv6_addr;
 	while (qc->iworker >= 0) {
 		res = &qc->worker[qc->iworker];
 		qc->iworker--;
@@ -960,8 +978,16 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 
 		switch (res->type) {
 			case NSTYPE_A:
-				do_fetch_resource(up, qc->parser.head.ident, que, (struct in_addr *)res->value, res->domain);
-				LOG_DEBUG("NSTYPE_A: %s %s\n", res->domain, inet_ntoa(*(struct in_addr*)res->value));
+				inet_4to6(&ipv6_addr, res->value);
+				do_fetch_resource(up, qc->parser.head.ident, que, &ipv6_addr, res->domain);
+				LOG_DEBUG("NSTYPE_A: %s %s\n", res->domain, ntop6(ipv6_addr));
+				res->ttl = 0;
+				if (parallel-- <= 0) return 0;
+				break;
+
+			case NSTYPE_AAAA:
+				do_fetch_resource(up, qc->parser.head.ident, que, (struct in6_addr *)res->value, res->domain);
+				LOG_DEBUG("NSTYPE_A: %s %s\n", res->domain, ntop6(res->value));
 				res->ttl = 0;
 				if (parallel-- <= 0) return 0;
 				break;
@@ -1039,7 +1065,7 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 			res = &qc->worker[i];
 
 			int target = *(int *)res->value;
-			if (res->type == NSTYPE_A && lookupRoute(htonl(target)) == 0) {
+			if (res->type == NSTYPE_A && lookupRoute4(htonl(target)) == 0) {
 				// qc->is_china_domain = 1;
 	            dns_query_continue(up, qc, que);
 				return 0;
@@ -1053,6 +1079,7 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 	qc->iworker = count - 1;
 
 	int parallel = 2;
+	struct in6_addr ipv6_addr;
 	while (qc->iworker >= 0) {
 		res = &qc->worker[qc->iworker];
 		qc->iworker--;
@@ -1061,8 +1088,16 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 
 		switch (res->type) {
 			case NSTYPE_A:
-				do_fetch_resource(up, qc->parser.head.ident, que, (struct in_addr *)res->value, res->domain);
-				LOG_DEBUG("NSTYPE_A: (0) %s %s\n", res->domain, inet_ntoa(*(struct in_addr*)res->value));
+				inet_4to6(&ipv6_addr, res->value);
+				do_fetch_resource(up, qc->parser.head.ident, que, &ipv6_addr, res->domain);
+				LOG_DEBUG("NSTYPE_A: (0) %s %s\n", res->domain, ntop6(ipv6_addr));
+				res->ttl = 0;
+				if (parallel-- <= 0) return 0;
+				return 0;
+
+			case NSTYPE_AAAA:
+				do_fetch_resource(up, qc->parser.head.ident, que, (struct in6_addr*)res->value, res->domain);
+				LOG_DEBUG("NSTYPE_A: (0) %s %s\n", res->domain, ntop6(res->value));
 				res->ttl = 0;
 				if (parallel-- <= 0) return 0;
 				return 0;
@@ -1107,23 +1142,23 @@ static int do_lookup_nameserver(dns_udp_context_t *up, struct query_context_t *q
 	return 0;
 }
 
-int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_in *in_addr1, socklen_t namlen, int fakeresp)
+int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_in6 *in_addr1, socklen_t namlen, int fakeresp)
 {
     int len;
     int err = 0;
 
     struct dns_question *que;
     struct dns_parser parser, *pparse;
-    static union { struct sockaddr sa; struct sockaddr_in in0; } dns;
+    struct sockaddr_in dns;
 
     pparse = dns_parse(&parser, (uint8_t *)buf, count);
     if (pparse == NULL || parser.head.question == 0) {
-        LOG_DEBUG("FROM: %s dns_forward dns_parse failure %p", inet_ntoa(in_addr1->sin_addr), pparse);
+        LOG_DEBUG("FROM: %s dns_forward dns_parse failure %p", ntop6(in_addr1->sin6_addr), pparse);
         return -1;
     }
 
 	if (parser.head.flags & 0x8000) {
-        LOG_DEBUG("FROM: %s this is not query", inet_ntoa(in_addr1->sin_addr));
+        LOG_DEBUG("FROM: %s this is not query", ntop6(in_addr1->sin6_addr));
 		return -1;
 	}
 
@@ -1197,7 +1232,7 @@ int dns_forward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_
 	return 0;
 }
 
-int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_in *in_addr1, socklen_t namlen, int fakeresp)
+int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr_in6 *in_addr1, socklen_t namlen, int fakeresp)
 {
 	int i, is_china_domain = 0;
 	struct dns_parser *p;
@@ -1205,25 +1240,25 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
 	struct dns_question *que;
 	struct dns_resource *res;
 
-	// is_china_domain = NULL == lookupRoute(htonl(in_addr1->sin_addr.s_addr));
+	// is_china_domain = NULL == lookupRoute4(htonl(in_addr1->sin_addr.s_addr));
 
 	p = dns_parse(&p0, (uint8_t *)buf, count);
     if (p == NULL || p0.head.question == 0) {
-        LOG_DEBUG("FROM: %s dns_backward dns_parse failure %p", inet_ntoa(in_addr1->sin_addr), p);
+        LOG_DEBUG("FROM: %s dns_backward dns_parse failure %p", ntop6(in_addr1->sin6_addr), p);
         return -1;
     }
 
 	if (~p->head.flags & 0x8000) {
-        LOG_DEBUG("FROM: %s this is not answer", inet_ntoa(in_addr1->sin_addr));
+        LOG_DEBUG("FROM: %s this is not answer", ntop6(in_addr1->sin6_addr));
 		return -1;
 	}
 
 	if (p->head.addon == 0 && p->head.answer == 1) {
 		if (p->answer[0].type == NSTYPE_A && (p->answer[0].ttl %  60)) {
-			LOG_DEBUG("FROM: %s this is not author", inet_ntoa(in_addr1->sin_addr));
+			LOG_DEBUG("FROM: %s this is not author", ntop6(in_addr1->sin6_addr));
 			return -1;
 		} else if (p->answer[0].type == NSTYPE_AAAA && (p->answer[0].ttl % 60)) {
-			LOG_DEBUG("FROM: %s this is not author", inet_ntoa(in_addr1->sin_addr));
+			LOG_DEBUG("FROM: %s this is not author", ntop6(in_addr1->sin6_addr));
 			return -1;
 		}
 	}
@@ -1234,13 +1269,13 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
 		if (res->type == NSTYPE_NS) {
 			LOG_DEBUG("NS: %s - %s", res->domain, *(char **)(res->value));
 		} else if (res->type == NSTYPE_A) {
-			LOG_DEBUG("V4: %s - %s", res->domain, inet_ntoa(*(struct in_addr *)res->value));
+			LOG_DEBUG("V4: %s - %s", res->domain, ntop6(res->value));
 		} else if (res->type == NSTYPE_CNAME) {
 			LOG_DEBUG("CNAME: %s - %s", res->domain, *(char **)(res->value));
 		}
 
         int target = *(int *)res->value;
-        if (res->type == NSTYPE_A && lookupRoute(htonl(target)) == 0) {
+        if (res->type == NSTYPE_A && lookupRoute4(htonl(target)) == 0) {
             LOG_DEBUG("china domain detect");
 			// is_china_domain = 1;
         }
@@ -1252,9 +1287,9 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
 		if (res->type == NSTYPE_NS) {
 			LOG_DEBUG("NS: %s - %s", res->domain, *(char **)(res->value));
 		} else if (res->type == NSTYPE_A) {
-			LOG_DEBUG("V4: %s - %s", res->domain, inet_ntoa(*(struct in_addr *)res->value));
+			LOG_DEBUG("V4: %s - %s", res->domain, ntop6(res->value));
 		} else if (res->type == NSTYPE_SOA) {
-			LOG_DEBUG("V4: %s - %s", res->domain, inet_ntoa(*(struct in_addr *)res->value));
+			LOG_DEBUG("V4: %s - %s", res->domain, ntop6(res->value));
 			found_soa = 1;
 		} else if (res->type == NSTYPE_CNAME) {
 			LOG_DEBUG("CNAME: %s - %s", res->domain, *(char **)(res->value));
@@ -1266,13 +1301,13 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
 		if (res->type == NSTYPE_NS) {
 			LOG_DEBUG("NS: %s - %s", res->domain, *(char **)(res->value));
 		} else if (res->type == NSTYPE_A) {
-			LOG_DEBUG("V4: %s - %s", res->domain, inet_ntoa(*(struct in_addr *)res->value));
+			LOG_DEBUG("V4: %s - %s", res->domain, ntop6(res->value));
 		} else if (res->type == NSTYPE_CNAME) {
 			LOG_DEBUG("CNAME: %s - %s", res->domain, *(char **)(res->value));
 		}
 
         int target = *(int *)res->value;
-        if (res->type == NSTYPE_A && lookupRoute(htonl(target)) == 0) {
+        if (res->type == NSTYPE_A && lookupRoute4(htonl(target)) == 0) {
             LOG_DEBUG("china domain detect");
 			// is_china_domain = 1;
         }
@@ -1310,7 +1345,7 @@ static void do_dns_udp_recv(void *upp)
 	int count;
 	socklen_t in_len1;
 	char buf[2048];
-	struct sockaddr_in in_addr1;
+	struct sockaddr_in6 in_addr1;
 	dns_udp_context_t *up = (dns_udp_context_t *)upp;
 
 	while (tx_readable(&up->file)) {
@@ -1351,30 +1386,30 @@ int txdns_create()
 	int sockfd;
 	int rcvbufsiz = 8192;
 	tx_loop_t *loop;
-	struct sockaddr_in in_addr1;
+	struct sockaddr_in6 in_addr1;
 	dns_udp_context_t *up = NULL;
 
-	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+	sockfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	TX_CHECK(sockfd != -1, "create dns socket failure");
 
 	tx_setblockopt(sockfd, 0);
 	setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, (char *)&rcvbufsiz, sizeof(rcvbufsiz));
 
-	in_addr1.sin_family = AF_INET;
-	in_addr1.sin_port = htons(5300);
-	in_addr1.sin_addr.s_addr = htonl(INADDR_ANY);
+	in_addr1.sin6_family = AF_INET6;
+	in_addr1.sin6_port = htons(5300);
+	in_addr1.sin6_addr = in6addr_loopback;
 	error = bind(sockfd, (struct sockaddr *)&in_addr1, sizeof(in_addr1));
 	TX_CHECK(error == 0, "bind dns socket failure");
 
-	outfd = socket(AF_INET, SOCK_DGRAM, 0);
+	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	TX_CHECK(outfd != -1, "create dns out socket failure");
 
 	tx_setblockopt(outfd, 0);
 	setsockopt(outfd, SOL_SOCKET, SO_RCVBUF, (char *)&rcvbufsiz, sizeof(rcvbufsiz));
 
-	in_addr1.sin_family = AF_INET;
-	in_addr1.sin_port = 0;
-	in_addr1.sin_addr.s_addr = 0;
+	in_addr1.sin6_family = AF_INET6;
+	in_addr1.sin6_port = 0;
+	in_addr1.sin6_addr = in6addr_any;
 	error = bind(outfd, (struct sockaddr *)&in_addr1, sizeof(in_addr1));
 	TX_CHECK(error == 0, "bind dns out socket failure");
 

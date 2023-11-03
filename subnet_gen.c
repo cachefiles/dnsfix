@@ -9,28 +9,15 @@
 #include "subnet_api.h"
 
 int _net_count = 0;
-subnet_t _net_list[25600];
+subnet_t _net_list[100000];
 static int _family = AF_INET;
+#define MAX_NET_SIZE (sizeof(_net_list)/sizeof(_net_list[0]))
 
-uint64_t pton_val(const char *addr)
-{
-	uint64_t val = 0;
-	uint32_t data[4];
+extern int __attribute__ ((alias ("_net_count"))) _net4_count;
+extern subnet_t __attribute__ ((alias ("_net_list"))) _net4_list[25600];
 
-	inet_pton(_family, addr, data);
-
-	if (_family == AF_INET) {
-		val = htonl(data[0]);
-		return val << 32;
-	}
-
-	if (_family == AF_INET6) {
-		val = htonl(data[0]);
-		return (val << 32) | htonl(data[1]);
-	}
-
-	return val;
-}
+extern int __attribute__ ((alias ("_net_count"))) _net6_count;
+extern subnet_t __attribute__ ((alias ("_net_list"))) _net6_list[25600];
 
 int includeNetwork(uint64_t network, uint8_t prefix)
 {
@@ -79,12 +66,14 @@ int includeNetwork(uint64_t network, uint8_t prefix)
 	for (i = 0; i < _net_count; i++) {
 		subnet_t snet = _net_list[i];
 
+		assert(j < MAX_NET_SIZE);
 		if ((snet.network & ~mask) != nnet.network)
 			_net_list[j++] = _net_list[i];
 		else if (snet.prefixlen < nnet.prefixlen)
 			assert(0);
 	}
 
+	assert(j < MAX_NET_SIZE);
 	_net_list[j++] = nnet;
 	_net_count = j;
 
@@ -93,7 +82,7 @@ int includeNetwork(uint64_t network, uint8_t prefix)
 
 int excludeNetwork(uint64_t network, uint8_t prefixlen)
 {
-	int i, j = 0, n = 0;
+	int i, j = 0;
 	uint64_t net1, msk1, newnet;
 	uint64_t net0, msk0 = (~0ull >> prefixlen);
 
@@ -107,8 +96,10 @@ int excludeNetwork(uint64_t network, uint8_t prefixlen)
 			if (_net_list[i].network == net0) {
 				assert(i == j);
 
-				while (++i < _net_count)
+				while (++i < _net_count) {
+					assert(j < MAX_NET_SIZE);
 					_net_list[j++] = _net_list[i];
+				}
 				_net_count = j;
 
 				for (int k = pref + 1; k <= prefixlen; k++) {
@@ -120,6 +111,7 @@ int excludeNetwork(uint64_t network, uint8_t prefixlen)
 				return 0;
 			}
 
+			assert(j < MAX_NET_SIZE);
 			_net_list[j++] = _net_list[i];
 			continue;
 		}
@@ -129,11 +121,44 @@ int excludeNetwork(uint64_t network, uint8_t prefixlen)
 			continue;
 		}
 
+		assert(j < MAX_NET_SIZE);
 		_net_list[j++] = _net_list[i];
 	}
 
 	_net_count = j;
 	return 0;
+}
+
+static inline int mylog2(int prefixlen)
+{
+	int log = 0;
+
+	if (prefixlen & 0xffff0000) {
+		prefixlen >>= 16;
+		log += 16;
+	}
+
+	if (prefixlen & 0xff00) {
+		prefixlen >>= 8;
+		log += 8;
+	}
+
+	if (prefixlen & 0xf0) {
+		prefixlen >>= 4;
+		log += 4;
+	}
+
+	if (prefixlen & 0xc) {
+		prefixlen >>= 2;
+		log += 2;
+	}
+
+	if (prefixlen & 0x2) {
+		prefixlen >>= 1;
+		log += 1;
+	}
+
+	return log;
 }
 
 #define COUNTOF(list) (sizeof(list)/sizeof(*list))
@@ -158,17 +183,7 @@ void initRoute6(const char *tag)
 			continue;
 		}
 
-		if (prefixlen > 48) {
-		    int save = prefixlen;
-			int origin = prefixlen;
-			prefixlen = 32;
-			while (save > 1) {
-				prefixlen--;
-				save >>= 1;
-			}
-		}
-
-		network = pton_val(sNetwork);
+		network = pton_val(sNetwork, _family);
 		includeNetwork(network, prefixlen);
 	}
 
@@ -179,17 +194,7 @@ void initRoute6(const char *tag)
 			continue;
 		}
 
-		if (prefixlen > 48) {
-		    int save = prefixlen;
-			int origin = prefixlen;
-			prefixlen = 32;
-			while (save > 1) {
-				prefixlen--;
-				save >>= 1;
-			}
-		}
-
-		network = pton_val(sNetwork);
+		network = pton_val(sNetwork, _family);
 		excludeNetwork(network, prefixlen);
 	}
 
@@ -217,7 +222,7 @@ void initRoute(const char *tag)
 			continue;
 		}
 
-		network = pton_val(sNetwork);
+		network = pton_val(sNetwork, _family);
 		includeNetwork(network, prefixlen);
 	}
 
@@ -228,7 +233,7 @@ void initRoute(const char *tag)
 			continue;
 		}
 
-		network = pton_val(sNetwork);
+		network = pton_val(sNetwork, _family);
 		excludeNetwork(network, prefixlen);
 	}
 
@@ -252,17 +257,11 @@ void loadRoute(const char *path, int (*callback)(uint64_t , uint8_t))
         int nmatch = sscanf(line, "%123[^/]/%d", sNetwork, &prefixlen);
 
 		if (prefixlen > 48) {
-		    int save = prefixlen;
-			int origin = prefixlen;
-			prefixlen = 32;
-			while (save > 1) {
-				prefixlen--;
-				save >>= 1;
-			}
+			prefixlen = 32 - mylog2(prefixlen);
 		}
 
         if (nmatch == 2) {
-            network = pton_val(sNetwork);
+            network = pton_val(sNetwork, _family);
             (*callback)(network, prefixlen);
         } else {
             // fscanf(fp, "%s", sNetwork);
@@ -288,15 +287,22 @@ static void dumpRoute(void)
 
 	fprintf(stdout, "#include \"subnet_api.h\"\n");
 	fprintf(stdout, "\n");
-	fprintf(stdout, "int _net_count = %d;\n", _net_count);
-	fprintf(stdout, "\n");
-	fprintf(stdout, "subnet_t _net_list[25600] = {");
+
+	if (_family == AF_INET) {
+		fprintf(stdout, "int _net4_count = %d;\n", _net_count);
+		fprintf(stdout, "\n");
+		fprintf(stdout, "subnet_t _net4_list[%d] = {", _net_count);
+	} else {
+		fprintf(stdout, "int _net6_count = %d;\n", _net_count);
+		fprintf(stdout, "\n");
+		fprintf(stdout, "subnet_t _net6_list[%d] = {", _net_count);
+	}
 
 	for (int i = 0; i < _net_count; i++) {
 		int slim = (i & 0x03);
 		fprintf(stdout, "%s", slim? " ": "\n    ");
-		fprintf(stdout, "{0x%08llx, 0, 0, %2d}%s", _net_list[i].network,
-				_net_list[i].prefixlen, (i + 1 == _net_count? "\n": ","));
+		fprintf(stdout, "{0, %2d, 0, 0, 0x%lxull}%s", _net_list[i].prefixlen,
+				_net_list[i].network, (i + 1 == _net_count? "\n": ","));
 	}
 	fprintf(stdout, "};\n");
 
@@ -308,19 +314,18 @@ int queryRoute(uint64_t ipv4, char *sTarget)
     char sNetwork[128];
 
     uint64_t target = (ipv4);
-    subnet_t *subnet = lookupRoute(target);
+    subnet_t *subnet = lookupRoute6(target);
 
 	uint64_t last_network = 0;
 	for (int i = 0; i < _net_count; i++) {
-		// fprintf(stderr, "%08x/%d\n", _net_list[i].network, _net_list[i].prefixlen);
+		// fprintf(stderr, "%16llx/%d\n", _net_list[i].network, _net_list[i].prefixlen);
 		assert(last_network < _net_list[i].network || last_network == 0);
 		last_network = _net_list[i].network;
 	}
 
     if (subnet != 0) {
-        uint64_t network = (subnet->network);
-
-        inet_ntop(_family, &network, sNetwork, sizeof(sNetwork));
+        uint64_t network[2] = {htonll(subnet->network), 0};
+        inet_ntop(_family, network, sNetwork, sizeof(sNetwork));
         fprintf(stderr, "ACTIVE network: %s/%d by %s\n", sNetwork, subnet->prefixlen, sTarget);
 	}
 
@@ -385,7 +390,7 @@ int main(int argc, char *argv[])
                 query = 1;
             }
 
-            queryRoute(pton_val(argv[i + 1]), argv[i + 1]);
+            queryRoute(pton_val(argv[i + 1], _family), argv[i + 1]);
             continue;
         }
 

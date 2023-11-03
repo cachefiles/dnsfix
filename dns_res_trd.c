@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 #include <assert.h>
+#include <endian.h>
 #include <stdlib.h>
 
 #include <sys/socket.h>
@@ -29,8 +30,8 @@
 #define closesocket close
 #endif
 
-#define NSCLASS_INET 0x01
-#define NSFLAG_RD    0x0100
+static char addrbuf[256];
+#define ntop6(addr) inet_ntop(AF_INET6, &addr, addrbuf, sizeof(addrbuf))
 
 struct dns_context {
 	int outfd;
@@ -59,9 +60,37 @@ static int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
     return dns_parse(dst, _qc_hold, len) == NULL;
 }
 
+struct subnet_info {
+	uint16_t tag; // 0x0008
+	uint16_t len;
+	uint16_t family;
+	uint8_t source_netmask;
+	uint8_t scope_netmask;
+	uint8_t addr[16];
+};
+
+#define NS_IPV6 2
+#define NS_IPV4 1
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+#define N16(x) __bswap_constant_16(x)
+#else
+#define N16(x) (x)
+#endif
+
+// china mobile 117.143.102.0/24
+const static struct subnet_info subnet4_data = {
+	0x08, sizeof(subnet4_data), NS_IPV4, 24, 0, {117, 143, 102, 0}
+};
+
+// vn he-ipv6 prefix 2001:470:35:639::/48
+const static struct subnet_info subnet6_data = {
+	0x08, sizeof(subnet6_data), NS_IPV6, 48, 0, {0x20, 0x01, 0x04, 0x70, 0x00, 0x35, 0x06, 0x39}
+};
+
 static int contains_subnet(struct dns_parser *p0)
 {
 	struct dns_resource *res = NULL;
+	struct subnet_info *info = NULL;
 
 	for (int i = 0; i < p0->head.addon; i++) {
 		res = &p0->addon[i];
@@ -81,7 +110,9 @@ static int contains_subnet(struct dns_parser *p0)
 				valp += sizeof(tag0) + htons(tag0.len);
 				len -= (sizeof(tag0) + htons(tag0.len));
 				if (tag0.tag == htons(0x0008)) {
-					return 1;
+					info = (struct subnet_info *)hold;
+					LOG_DEBUG("taglen=%d family=%d", htons(tag0.len), htons(info->family));
+					return htons(info->family) == NS_IPV4;
 				}
 			}
 		}
@@ -90,16 +121,20 @@ static int contains_subnet(struct dns_parser *p0)
 	return 0;
 }
 
-static int add_client_subnet(struct dns_parser *p0, uint8_t *optbuf)
+static int add_client_subnet(struct dns_parser *p0, uint8_t *optbuf, const struct subnet_info *info)
 {
 #ifndef DISABLE_SUBNET
-	// china mobile 117.143.102.0/24
-	const static char subnet_data[] = "\x00\x08\x00\x07\x00\x01\x18\x00\x75\x8f\x66";
-
-#define subnet_len (sizeof(subnet_data) - 1)
 
 	int have_edns = 0;
 	struct dns_resource *res = NULL;
+	struct subnet_info info0 = *info;
+
+	int prefixlen = info->source_netmask + info->scope_netmask;
+	size_t subnet_len = 8 + ((7 + prefixlen) >> 3);
+
+	info0.tag = htons(info->tag);
+	info0.family = htons(info->family);
+	info0.len    = htons(4 + ((7 + prefixlen) >> 3));
 
 	for (int i = 0; i < p0->head.addon; i++) {
 		res = &p0->addon[i];
@@ -123,7 +158,7 @@ static int add_client_subnet(struct dns_parser *p0, uint8_t *optbuf)
 					memcpy(optbuf, valp0, (hold - valp0));
 					memcpy(optbuf + (hold - valp0), valp, len);
 
-					memcpy(optbuf + (hold - valp0) + len, subnet_data, subnet_len);
+					memcpy(optbuf + (hold - valp0) + len, &info0, subnet_len);
 					*(void **)res->value = optbuf;
 					res->len = len + (hold - valp0) + subnet_len;
 					have_edns = 1;
@@ -134,25 +169,26 @@ static int add_client_subnet(struct dns_parser *p0, uint8_t *optbuf)
 			if (have_edns == 0) {
 				const uint8_t * valp = *(const uint8_t **)res->value;
 
-				memcpy(optbuf, subnet_data, subnet_len);
+				memcpy(optbuf, &info0, subnet_len);
 				memcpy(optbuf + subnet_len, valp, res->len);
 
 				*(void **)res->value = optbuf;
 				res->len += subnet_len;
+				have_edns = 1;
 			}
 		}
 	}
 
-	if (p0->head.addon == 0) {
-		res = &p0->addon[0];
-		p0->head.addon = 1;
+	if (p0->head.addon < MAX_RECORD_COUNT && have_edns == 0) {
+		res = &p0->addon[p0->head.addon++];
 
 		res->domain = "";
 		res->klass = 0x1000;
 		res->type = NSTYPE_OPT;
 		res->ttl  = 0;
 		res->len  = subnet_len;
-		*(const void **)res->value = subnet_data;
+		memcpy(optbuf, &info0, subnet_len);
+		*(const void **)res->value = optbuf; 
 	}
 #endif
 
@@ -169,6 +205,7 @@ static int dns_contains(const char *domain)
 		"net.", "edu.", "co.", "org.", "com.", "gov.", NULL
 	};
 
+	(void)_tld1;
 	for (i = 0; _tld0[i]; i++) {
 		if (strncmp(domain, _tld0[i], 4) == 0) {
 			return 1;
@@ -184,8 +221,7 @@ static int dns_contains(const char *domain)
 
 static int dns_unwrap(struct dns_parser *p1)
 {
-	int num = p1->head.question;
-	const char *domain = NULL;
+	char *domain = NULL;
 	struct dns_question *que, *que1;
 
 	que = &p1->question[0];
@@ -283,12 +319,12 @@ static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockadd
 
 	len = dns_build(parser, _hold, sizeof(_hold));
 
-	const struct sockaddr_in *inp = (const struct sockaddr_in *)to;
-	LOG_DEBUG("dns_build bytes %d %d %d %s", len, inp->sin_family, htons(inp->sin_port), inet_ntoa(inp->sin_addr));
+	const struct sockaddr_in6 *inp = (const struct sockaddr_in6 *)to;
+	LOG_DEBUG("dns_build bytes %ld %d %d %s", len, inp->sin6_family, htons(inp->sin6_port), ntop6(inp->sin6_addr));
 	if (len != -1)
 		len = sendto(outfd, _hold, len, 0, to, tolen);
 	else
-		LOG_DEBUG("dns_build %d", len);
+		LOG_DEBUG("dns_build %ld", len);
 
 	return len;
 }
@@ -325,23 +361,24 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	}
 	p0.question[0] = p1->question[1];
 
-	int save_opt = p0.head.addon;
-	p0.head.addon = 0;
-	p0.head.flags |= NSFLAG_RD;
-	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
-	if (retval == -1) {
-		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
-		return 0;
-	}
-
 	uint8_t optbuf[256];
-	p0.head.addon = save_opt;
-	add_client_subnet(&p0, optbuf);
+	add_client_subnet(&p0, optbuf, &subnet4_data);
 	
 	p0.head.ident += 0x1000;
+	p0.head.flags |= NSFLAG_RD;
 	retval = dns_sendto(ctx->outfd, &p0, ctx->ecsaddr, ctx->dnslen);
 	if (retval == -1) {
 		LOG_DEBUG("dns_sendto failure");
+		return 0;
+	}
+
+	p0.head.addon = 0;
+	if (p0.question[0].type == NSTYPE_AAAA)
+		add_client_subnet(&p0, optbuf, &subnet6_data);
+
+	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
+	if (retval == -1) {
+		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
 		return 0;
 	}
 
@@ -437,7 +474,53 @@ int dns_answer_diff(struct dns_parser *p1, struct dns_parser *p2)
 	return d || ncname < 2;
 }
 
-int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in *from)
+static const char * get_suffix(const char *domain, int ndot)
+{
+	assert (ndot < 256);
+	
+	int offset = 0;
+	const char *dots[256] = {};
+
+    dots[offset] = domain;
+    for (; *domain; domain++) {
+        switch(*domain) {
+            case '.':
+                if (domain > dots[offset]) offset++;
+                dots[offset] = domain + 1;
+                break;
+
+			default:
+				break;
+        }
+    }
+
+	if (domain > dots[offset]) offset++;
+
+	if (offset > ndot) {
+	    LOG_DEBUG("offset = %d ndot=%d %s", offset, ndot, dots[offset - ndot]);
+		return dots[offset - ndot];
+	}
+ 
+	return 0;
+}
+
+static subnet_t *lookupRoute(const void *block, int type)
+{
+	uint64_t network;
+
+	memcpy(&network, block, sizeof(network));
+	if (type == NSTYPE_AAAA) {
+		return lookupRoute6(htonll(network)); 
+	}
+
+	if (type == NSTYPE_A) {
+		return lookupRoute4(htonll(network));
+	}
+
+	return NULL;
+}
+
+int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
 {
 	struct dns_parser p0;
 	struct dns_parser *pp;
@@ -451,7 +534,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	}
 
     if (~p0.head.flags & 0x8000) {
-        LOG_DEBUG("FROM: %s this is not response", inet_ntoa(from->sin_addr));
+        LOG_DEBUG("FROM: %s this is not response", ntop6(from->sin6_addr));
         return -1;
     }
 	
@@ -464,6 +547,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		qc->is_china_domain = 1;
 	}
 
+	assert (p0.question[0].domain);
 	if (strcmp(qc->parser.question[1].domain, p0.question[0].domain)) {
 		struct dns_parser p1 = {};
 		const char *domain = p0.question[0].domain;
@@ -509,12 +593,13 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 		for (i = 0; i < p0.head.answer; i++) {
 			res = &p0.answer[i];
-			unsigned *v4addrp = res->value;
-			if (res->type == NSTYPE_A && lookupRoute(htonl(*v4addrp))  == NULL) {
-				qc->is_china_domain = 1;
-				break;
-			} else if (res->type == NSTYPE_A && lookupRoute(htonl(*v4addrp))) {
-				qc->is_nonchina_domain = 1;
+			if (res->type == NSTYPE_A || res->type == NSTYPE_AAAA) {
+				if (NULL == lookupRoute(res->value, res->type)) {
+					qc->is_china_domain = 1;
+					break;
+				} else {
+					qc->is_nonchina_domain = 1;
+				}
 			}
 		}
 
@@ -533,8 +618,8 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 	for (i = 0; i < p0.head.answer; i++) {
 		res = &p0.answer[i];
-		unsigned *v4addrp = res->value;
-		if (res->type == NSTYPE_A && NULL == lookupRoute(htonl(*v4addrp))) {
+		if ((res->type == NSTYPE_A || res->type == NSTYPE_AAAA)
+				&& NULL == lookupRoute(res->value, res->type)) {
 			dns_parser_copy(&qc->ecs_parser, &p0);
 			qc->is_china_domain = 1;
 			break;
@@ -555,6 +640,16 @@ check_flush:
 		res->ttl    = 3600;
 		*(const char **)res->value  = add_domain(&p0, qc->parser.question[1].domain);
 		p0.head.answer++;
+
+		const char *ptr = get_suffix(qc->parser.question[0].domain, 3);
+		
+		for (i = 0; i < p0.head.author && ptr; i++) {
+			res = &p0.author[i];
+			if (res->type == NSTYPE_SOA) {
+				res->domain = add_domain(&p0, ptr);
+				res->ttl = 7200;
+			}
+		}
 
 		p0.head.addon = 0;
 		p0.head.ident = qc->parser.head.ident;
@@ -589,6 +684,16 @@ check_flush:
 			LOG_DEBUG("ecs is ok, do not return cname");
 		}
 
+		const char *ptr = get_suffix(qc->parser.question[0].domain, 3);
+		
+		for (i = 0; i < p0.head.author && ptr; i++) {
+			res = &p0.author[i];
+			if (res->type == NSTYPE_SOA) {
+				res->domain = add_domain(&p0, ptr);
+				res->ttl = 7200;
+			}
+		}
+
 		p0.head.ident = qc->parser.head.ident;
 		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 	}
@@ -604,18 +709,18 @@ int main(int argc, char *argv[])
 {
 	int retval;
 	int outfd, sockfd;
-	struct sockaddr_in myaddr;
+	struct sockaddr_in6 myaddr;
 	struct sockaddr * paddr = (struct sockaddr *)&myaddr;
 
 	struct sockaddr_in6 myaddr6;
 	struct sockaddr * paddr6 = (struct sockaddr *)&myaddr6;
 
-	outfd = socket(AF_INET, SOCK_DGRAM, 0);
+	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	assert(outfd != -1);
 
-	myaddr.sin_family = AF_INET;
-	myaddr.sin_port   = 0;
-	myaddr.sin_addr.s_addr = INADDR_ANY;
+	myaddr.sin6_family = AF_INET6;
+	myaddr.sin6_port   = 0;
+	myaddr.sin6_addr   = in6addr_any;
 	retval = bind(outfd, paddr, sizeof(myaddr));
 	assert(retval != -1);
 
@@ -632,8 +737,8 @@ int main(int argc, char *argv[])
 	char buf[2048];
 	fd_set readfds = {};
 	socklen_t addrl = 0;
-	struct sockaddr_in dnsaddr;
-	struct sockaddr_in ecsaddr;
+	struct sockaddr_in6 dnsaddr;
+	struct sockaddr_in6 ecsaddr;
 
 	struct dns_context c0 = {
 		.outfd = outfd,
@@ -641,23 +746,23 @@ int main(int argc, char *argv[])
 		.dnslen  = sizeof(dnsaddr),
 	};
 
-	setenv("NAMESERVER", "8.8.8.8", 0);
-	setenv("ECS_SERVER", "8.8.8.8", 0);
+	setenv("NAMESERVER", "::ffff:8.8.8.8", 0);
+	setenv("ECS_SERVER", "::ffff:8.8.8.8", 0);
 
-	dnsaddr.sin_family = AF_INET;
-	dnsaddr.sin_port   = htons(53);
-	dnsaddr.sin_addr.s_addr = inet_addr(getenv("NAMESERVER"));
+	dnsaddr.sin6_family = AF_INET6;
+	dnsaddr.sin6_port   = htons(53);
+	inet_pton(AF_INET6, getenv("NAMESERVER"), &dnsaddr.sin6_addr);
 
-	ecsaddr.sin_family = AF_INET;
-	ecsaddr.sin_port   = htons(53);
-	ecsaddr.sin_addr.s_addr = inet_addr(getenv("ECS_SERVER"));
+	ecsaddr.sin6_family = AF_INET6;
+	ecsaddr.sin6_port   = htons(53);
+	inet_pton(AF_INET6, getenv("ECS_SERVER"), &ecsaddr.sin6_addr);
 
 	c0.dnsaddr = (struct sockaddr *)&dnsaddr;
 	c0.ecsaddr = (struct sockaddr *)&ecsaddr;
-	LOG_DEBUG("nsaddr %p pointer %p %d", c0.dnsaddr, &dnsaddr, htons(dnsaddr.sin_port));
+	LOG_DEBUG("nsaddr %p pointer %p %d", c0.dnsaddr, &dnsaddr, htons(dnsaddr.sin6_port));
 
-	const struct sockaddr_in *inp = (const struct sockaddr_in *)&dnsaddr;
-	LOG_DEBUG("dns_build bytes %d %d %d %s", 0, inp->sin_family, htons(inp->sin_port), inet_ntoa(inp->sin_addr));
+	const struct sockaddr_in6 *inp = (const struct sockaddr_in6 *)&dnsaddr;
+	LOG_DEBUG("dns_build bytes %d %d %d %s", 0, inp->sin6_family, htons(inp->sin6_port), ntop6(inp->sin6_addr));
 
 	do {
 		FD_ZERO(&readfds);
@@ -671,18 +776,18 @@ int main(int argc, char *argv[])
 		}
 
 		if (FD_ISSET(outfd, &readfds)) {
-			LOG_DEBUG("outfd is readable");
 			addrl = sizeof(myaddr);
 			count = recvfrom(outfd, buf, sizeof(buf), 0, paddr, &addrl);
 			assert(count > 0);
+			count > 0 || LOG_DEBUG("outfd is readable");
 			do_dns_backward(&c0, buf, count, &myaddr);
 		}
 
 		if (FD_ISSET(sockfd, &readfds)) {
-			LOG_DEBUG("sockfd is readable");
 			addrl = sizeof(myaddr6);
 			count = recvfrom(sockfd, buf, sizeof(buf), 0, paddr6, &addrl);
 			assert(count > 0);
+			count > 0 || LOG_DEBUG("sockfd is readable");
 			do_dns_forward(&c0, buf, count, &myaddr6);
 		}
 

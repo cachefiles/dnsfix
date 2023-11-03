@@ -29,6 +29,9 @@
 #define closesocket close
 #endif
 
+static char addrbuf[256];
+#define ntop6(addr) inet_ntop(AF_INET6, &addr, addrbuf, sizeof(addrbuf))
+
 struct dns_resource _predefine_resource_record[] = {
 	{
 		.type = NSTYPE_SOA,
@@ -135,8 +138,6 @@ struct dns_context {
 };
 
 struct dns_query_context {
-	int is_china_domain;
-	int is_nonchina_domain;
 	struct sockaddr_in6 from;
 	struct dns_parser parser;
 };
@@ -285,13 +286,13 @@ static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockadd
 
 	len = dns_build(parser, _hold, sizeof(_hold));
 
-	const struct sockaddr_in *inp = (const struct sockaddr_in *)to;
-	LOG_DEBUG("dns_build bytes %d %d %d %s", len, inp->sin_family, htons(inp->sin_port), inet_ntoa(inp->sin_addr));
+	const struct sockaddr_in6 *inp = (const struct sockaddr_in6 *)to;
 	if (len != -1)
 		len = sendto(outfd, _hold, len, 0, to, tolen);
 	else
 		LOG_DEBUG("dns_build %d", len);
 
+	LOG_DEBUG("dns_build bytes %d %d %d %s", len, inp->sin6_family, htons(inp->sin6_port), ntop6(inp->sin6_addr));
 	return len;
 }
 
@@ -360,7 +361,6 @@ struct dns_soa {
 static int dump_resource(const char *title, struct dns_resource *res)
 {
 	
-	char inet6[256];
 	       if (res->type == NSTYPE_TXT) {
 			LOG_DEBUG("%s %s TXT", title, res->domain);
 	} else if (res->type == NSTYPE_A) {
@@ -372,7 +372,7 @@ static int dump_resource(const char *title, struct dns_resource *res)
 	} else if (res->type == NSTYPE_SOA) {
 			LOG_DEBUG("%s %s SOA %s", title, res->domain, *(const char **)res->value);
 	} else if (res->type == NSTYPE_AAAA) {
-			LOG_DEBUG("%s %s AAAA %s", title, res->domain, inet_ntop(AF_INET6, res->value, inet6, sizeof(inet6)));
+			LOG_DEBUG("%s %s AAAA %s", title, res->domain, ntop6(res->value));
 	} else if (res->type == NSTYPE_CNAME) {
 			LOG_DEBUG("%s %s CNAME %s", title, res->domain, *(const char **)res->value);
 	} else {
@@ -383,35 +383,47 @@ static int dump_resource(const char *title, struct dns_resource *res)
 }
 
 
-static int setup_route(uint32_t ipv4)
+static int setup_route(const void* ip, int family)
 {
+	uint64_t val = 0;
+	subnet_t *subnet = NULL;
 	char sTarget[128], sNetwork[128];
-	uint32_t target = htonl(ipv4);
-	subnet_t *subnet = lookupRoute(target);
 
-	inet_ntop(AF_INET, &ipv4, sTarget, sizeof(sTarget));
+
+	inet_ntop(family, ip, sTarget, sizeof(sTarget));
+	if (family == AF_INET6) {
+		val = htonll(*(uint64_t *)ip);
+		subnet = lookupRoute6(val);
+	} else if (family == AF_INET) {
+		val = htonll(*(uint64_t *)ip) & 0xffffffff00000000ull;
+		subnet = lookupRoute4(val);
+	}
 
 	if (subnet != 0 && subnet->flags == 0) {
-		unsigned network = htonl(subnet->network);
+		char sCmd[1024];
+		uint64_t network = htonll(subnet->network);
 
-		inet_ntop(AF_INET, &network, sNetwork, sizeof(sNetwork));
+		inet_ntop(family, &network, sNetwork, sizeof(sNetwork));
 		fprintf(stderr, "ACTIVE network: %s/%d by %s\n", sNetwork, subnet->prefixlen, sTarget);
 		subnet->flags = 1;
 
-		char sCmd[1024];
-		sprintf(sCmd, "ipset add ipsec %s/%d", sNetwork, subnet->prefixlen);
-		fprintf(stderr, "CMD=%s\n", sCmd);
-		system(sCmd);
-		sprintf(sCmd, "ip route add %s/%d dev tunnel1 mtu 1400 table 20", sNetwork, subnet->prefixlen);
-		fprintf(stderr, "CMD=%s\n", sCmd);
-		system(sCmd);
+		if (family == AF_INET) {
+			sprintf(sCmd, "ipset add ipsec %s/%d", sNetwork, subnet->prefixlen);
+			fprintf(stderr, "CMD=%s\n", sCmd);
+			system(sCmd);
+		} else {
+			sprintf(sCmd, "ip -6 route add %s/%d dev tun0 mtu 1400 table 100", sNetwork, subnet->prefixlen);
+			fprintf(stderr, "CMD=%s\n", sCmd);
+			system(sCmd);
+		}
+
 		return 0;
 	}
 
 	return 0;
 }
 
-int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in *from)
+int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
 {
 	struct dns_parser p0;
 	struct dns_parser *pp;
@@ -424,7 +436,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	}
 
 	if (~p0.head.flags & 0x8000) {
-		LOG_DEBUG("FROM: %s this is not response", inet_ntoa(from->sin_addr));
+		LOG_DEBUG("FROM: %s this is not response", ntop6(from->sin6_addr));
 		return -1;
 	}
 	
@@ -466,18 +478,17 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 #if 1
 	for (i = 0; i < p0.head.answer; i++) {
 		res = &p0.answer[i];
-		res->ttl = 3600;
-		if (res->type != NSTYPE_A) {
-			continue;
+		if (res->type == NSTYPE_A) {
+			setup_route(res->value, AF_INET);
+		} else if (res->type == NSTYPE_AAAA) {
+			setup_route(res->value, AF_INET6);
 		}
-		uint32_t *v4addrp = (uint32_t *)res->value;
-		setup_route(*v4addrp);
 	}
 #endif
 
 	// p0.head.addon = 0;
-	p0.head.ident = qc->parser.head.ident;
 	char buf0[256];
+	p0.head.ident = qc->parser.head.ident;
 	LOG_DEBUG("dns_sendto %s:%d", inet_ntop(AF_INET6, &qc->from.sin6_addr, buf0, sizeof(buf0)), htons(qc->from.sin6_port));
 	dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 
@@ -488,18 +499,18 @@ int main(int argc, char *argv[])
 {
 	int retval;
 	int outfd, sockfd;
-	struct sockaddr_in myaddr;
+	struct sockaddr_in6 myaddr;
 	struct sockaddr * paddr = (struct sockaddr *)&myaddr;
 
 	struct sockaddr_in6 myaddr6;
 	struct sockaddr * paddr6 = (struct sockaddr *)&myaddr6;
 
-	outfd = socket(AF_INET, SOCK_DGRAM, 0);
+	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	assert(outfd != -1);
 
-	myaddr.sin_family = AF_INET;
-	myaddr.sin_port   = 0;
-	myaddr.sin_addr.s_addr = INADDR_ANY;
+	myaddr.sin6_family = AF_INET6;
+	myaddr.sin6_port   = 0;
+	myaddr.sin6_addr   = in6addr_any;
 	retval = bind(outfd, paddr, sizeof(myaddr));
 	assert(retval != -1);
 
@@ -520,7 +531,7 @@ int main(int argc, char *argv[])
 	char buf[2048];
 	fd_set readfds = {};
 	socklen_t addrl = 0;
-	struct sockaddr_in dnsaddr;
+	struct sockaddr_in6 dnsaddr;
 
 	struct dns_context c0 = {
 		.outfd = outfd,
@@ -528,18 +539,18 @@ int main(int argc, char *argv[])
 		.dnslen  = sizeof(dnsaddr),
 	};
 
-	setenv("NAMESERVER", "8.8.8.8", 0);
+	setenv("NAMESERVER", "::ffff:8.8.8.8", 0);
 
-	dnsaddr.sin_family = AF_INET;
-	dnsaddr.sin_port   = htons(53);
-	dnsaddr.sin_addr.s_addr = inet_addr(getenv("NAMESERVER"));
+	dnsaddr.sin6_family = AF_INET6;
+	dnsaddr.sin6_port   = htons(53);
+	inet_pton(AF_INET6, getenv("NAMESERVER"), &dnsaddr.sin6_addr);
 	// dnsaddr.sin_addr.s_addr = inet_addr("223.5.5.5");
 
 	c0.dnsaddr = (struct sockaddr *)&dnsaddr;
-	LOG_DEBUG("nsaddr %p pointer %p %d", c0.dnsaddr, &dnsaddr, htons(dnsaddr.sin_port));
+	LOG_DEBUG("nsaddr %p pointer %p %d", c0.dnsaddr, &dnsaddr, htons(dnsaddr.sin6_port));
 
-	const struct sockaddr_in *inp = (const struct sockaddr_in *)&dnsaddr;
-	LOG_DEBUG("dns_build bytes %d %d %d %s", 0, inp->sin_family, htons(inp->sin_port), inet_ntoa(inp->sin_addr));
+	const struct sockaddr_in6 *inp = (const struct sockaddr_in *)&dnsaddr;
+	LOG_DEBUG("dns_build bytes %d %d %d %s", 0, inp->sin6_family, htons(inp->sin6_port), ntop6(inp->sin6_addr));
 
 	do {
 		FD_ZERO(&readfds);
@@ -553,17 +564,17 @@ int main(int argc, char *argv[])
 		}
 
 		if (FD_ISSET(outfd, &readfds)) {
-			LOG_DEBUG("outfd is readable");
 			addrl = sizeof(myaddr);
 			count = recvfrom(outfd, buf, sizeof(buf), 0, paddr, &addrl);
+			count > 0 || LOG_DEBUG("outfd is readable");
 			assert(count > 0);
 			do_dns_backward(&c0, buf, count, &myaddr);
 		}
 
 		if (FD_ISSET(sockfd, &readfds)) {
-			LOG_DEBUG("sockfd is readable");
 			addrl = sizeof(myaddr6);
 			count = recvfrom(sockfd, buf, sizeof(buf), 0, paddr6, &addrl);
+			count > 0 || LOG_DEBUG("sockfd is readable");
 			assert(count > 0);
 			do_dns_forward(&c0, buf, count, &myaddr6);
 		}

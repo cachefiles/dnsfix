@@ -30,6 +30,10 @@
 #define closesocket close
 #endif
 
+static char addrbuf[256];
+#define ntop6(addr) inet_ntop(AF_INET6, &addr, addrbuf, sizeof(addrbuf))
+#define ntop6p(addr) inet_ntop(AF_INET6, addr, addrbuf, sizeof(addrbuf))
+
 struct dns_soa {
         const char *name_server;
         const char *admin_email;
@@ -39,7 +43,6 @@ struct dns_soa {
         uint32_t day4;
         uint32_t day5;
 };
-
 
 static struct dns_soa _rr_soa = {
         .name_server = "ns2.cootail.com",
@@ -117,7 +120,6 @@ int fetch_predefine_resource_record(struct dns_parser *parser)
 	int found = 0;
 	struct dns_resource *res;
 	struct dns_question *que = &parser->question[0];
-	size_t domain_plen = strlen(que->domain);
 
 	for (int i = 0; i < ARRAY_SIZE(_predefine_resource_record); i++) {
 
@@ -149,7 +151,7 @@ struct dns_context {
 	int sockfd;
 
 	socklen_t dnslen;
-	struct sockaddr *dnsaddr;
+	struct sockaddr_in6 *dnsaddr;
 };
 
 struct dns_query_context {
@@ -159,6 +161,8 @@ struct dns_query_context {
 };
 
 static struct dns_query_context _orig_list[0xfff];
+
+static struct sockaddr_in6 _ain6 = {};
 
 static int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
 {
@@ -177,6 +181,7 @@ static int dns_contains(const char *domain)
 		"net.", "edu.", "co.", "org.", "com.", "gov.", NULL
 	};
 
+	(void)_tld1;
 	for (i = 0; _tld0[i]; i++) {
 		if (strncmp(domain, _tld0[i], 4) == 0) {
 			return 1;
@@ -192,7 +197,6 @@ static int dns_contains(const char *domain)
 
 static int dns_rewrap(struct dns_parser *p1)
 {
-	int num = p1->head.question;
 	const char *domain = NULL;
 	struct dns_question *que, *que1;
 
@@ -200,7 +204,7 @@ static int dns_rewrap(struct dns_parser *p1)
 	que1 = &p1->question[1];
 
 	int ndot = 0;
-	char *limit, *optp;
+	char *optp;
 	char *dots[8] = {}, title[256];
 
 	// LOG_DEBUG("suffixes: %s %d", que->domain, que->type);
@@ -254,21 +258,20 @@ static int dns_rewrap(struct dns_parser *p1)
 	return -1;
 }
 
-static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockaddr *to, size_t tolen)
+static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockaddr_in6 *inp, size_t tolen)
 {
 	ssize_t len;
-	char buf[256];
 	uint8_t _hold[2048];
+	const struct sockaddr *to = (const struct sockaddr *)inp;
 
 	len = dns_build(parser, _hold, sizeof(_hold));
 
-	const struct sockaddr_in6 *inp = (const struct sockaddr_in6 *)to;
 
 	if (len != -1)
 		len = sendto(outfd, _hold, len, 0, to, tolen);
 
-	LOG_DEBUG("dns_sendto %d af=%d %d %s %s", len, inp->sin6_family, htons(inp->sin6_port),
-			inet_ntop(AF_INET6, &inp->sin6_addr, buf, 256), parser->question[0].domain);
+	LOG_DEBUG("dns_sendto %d af=%d %d %s %s", len,
+			inp->sin6_family, htons(inp->sin6_port), ntop6(inp->sin6_addr), parser->question[0].domain);
 
 	return len;
 }
@@ -378,6 +381,12 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 			return 0;
 		}
 
+		retval = dns_sendto(ctx->outfd, &p0, &_ain6, sizeof(_ain6));
+		if (retval == -1) {
+			LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
+			return 0;
+		}
+
 		*qc1 = qc0;
 		qc1->digest = 0;
 		dns_parser_copy(&qc1->parser, &qc0.parser);
@@ -389,7 +398,6 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 static int dump_resource(const char *title, struct dns_resource *res)
 {
 	
-	char inet6[256];
 	       if (res->type == NSTYPE_TXT) {
 			LOG_DEBUG("%s %s TXT", title, res->domain);
 	} else if (res->type == NSTYPE_A) {
@@ -401,7 +409,7 @@ static int dump_resource(const char *title, struct dns_resource *res)
 	} else if (res->type == NSTYPE_SOA) {
 			LOG_DEBUG("%s %s SOA %s", title, res->domain, *(const char **)res->value);
 	} else if (res->type == NSTYPE_AAAA) {
-			LOG_DEBUG("%s %s AAAA %s", title, res->domain, inet_ntop(AF_INET6, res->value, inet6, sizeof(inet6)));
+			LOG_DEBUG("%s %s AAAA %s", title, res->domain, ntop6p(res->value));
 	} else if (res->type == NSTYPE_CNAME) {
 			LOG_DEBUG("%s %s CNAME %s", title, res->domain, *(const char **)res->value);
 	} else {
@@ -453,35 +461,62 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	}
 #endif
 	
-	char name[256];
 	int offset = (p0.head.ident & 0xfff);
 	struct dns_query_context *qc = &_orig_list[offset];
 
 	pp = &qc->parser;
 	if (pp->head.ident != p0.head.ident || pp->head.question != 2) {
-		LOG_DEBUG("FROM: %s XX unexpected response", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)));
+		LOG_DEBUG("FROM: %s XX unexpected response", ntop6(from->sin6_addr));
 		return -1;
+	}
+
+	if (IN6_ARE_ADDR_EQUAL(&_ain6.sin6_addr, &from->sin6_addr)) {
+		int found = 0;
+		uint64_t val = 0;
+
+		for (i = 0; 3 != found && i < p0.head.addon; i++) {
+			res = &p0.addon[i];
+			if (res->type == NSTYPE_AAAA) {
+				val = htonll(*(uint64_t *)res->value);
+				found = 2 + !lookupRoute6(val);
+			} else if (res->type == NSTYPE_A) {
+				val = htonll(*(uint64_t *)res->value) & 0xffffffff00000000ull;
+				found = 2 + !lookupRoute4(val);
+			}
+		}
+
+		LOG_DEBUG("found=%d %s", found, ntop6(from->sin6_addr));
+		if (found == 2) {
+			p0.question[0] = pp->question[0];
+
+			p0.head.flags |= NSFLAG_QR;
+			p0.head.flags &= ~NSFLAG_RCODE;
+			p0.head.flags |= RCODE_REFUSED;
+
+			dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+			return -1;
+		}
 	}
 
 	uint32_t digest = get_check_sum(buf, 6 * 2);
 	if (digest != qc->digest && qc->digest != 0) {
-		LOG_DEBUG("FROM: %s digest %08x %08x %d", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)), digest, qc->digest, count);
+		LOG_DEBUG("FROM: %s digest %08x %08x %d", ntop6(from->sin6_addr), digest, qc->digest, count);
 		return -1;
 	}
 
 	qc->digest = digest;
 	if (p0.head.author != 0 && p0.head.answer > 0) {
-		LOG_DEBUG("FROM: %s %d/%d/%d unexpected response", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)), p0.head.author, p0.head.answer, p0.head.addon);
+		LOG_DEBUG("FROM: %s %d/%d/%d unexpected response", ntop6(from->sin6_addr), p0.head.author, p0.head.answer, p0.head.addon);
 		return -1;
 	}
 
 	if (pp->head.answer > p0.head.answer) {
-		LOG_DEBUG("FROM: %s should not overwrite response", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)));
+		LOG_DEBUG("FROM: %s should not overwrite response", ntop6(from->sin6_addr));
 		return -1;
 	}
 
 	if (strcasecmp(pp->question[1].domain, p0.question[0].domain)) {
-		LOG_DEBUG("FROM: %s should not overwrite response since question not ok", inet_ntop(AF_INET6, &from->sin6_addr, name, sizeof(name)));
+		LOG_DEBUG("FROM: %s should not overwrite response since question not ok", ntop6(from->sin6_addr));
 		LOG_DEBUG("FROM: domain %s %s", pp->question[1].domain, p0.question[0].domain);
 		return -1;
 	}
@@ -543,7 +578,11 @@ int main(int argc, char *argv[])
 	struct sockaddr * paddr1 = (struct sockaddr *)&myaddr6;
 
 	setenv("NAMESERVER", "2408:4009:501::2", 0);
-	setenv("LOCALADDR6", "2001:470:a:38d::2", 0);
+	setenv("LOCALADDR6", "2001:470:66:22a::2", 0);
+
+	_ain6.sin6_family = AF_INET6;
+	_ain6.sin6_port   = htons(53);
+	inet_pton(AF_INET6, "::ffff:192.41.162.30", &_ain6.sin6_addr); 
 
 	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	assert(outfd != -1);
@@ -580,10 +619,10 @@ int main(int argc, char *argv[])
 	dnsaddr.sin6_port   = htons(53);
 	inet_pton(AF_INET6, getenv("NAMESERVER"), &dnsaddr.sin6_addr);
 
-	c0.dnsaddr = (struct sockaddr *)&dnsaddr;
+	c0.dnsaddr = &dnsaddr;
 	LOG_DEBUG("nsaddr %p pointer %p %d", c0.dnsaddr, &dnsaddr, htons(dnsaddr.sin6_port));
 
-	const struct sockaddr_in6 *inp = (const struct sockaddr_in *)&dnsaddr;
+	const struct sockaddr_in6 *inp = &dnsaddr;
 	LOG_DEBUG("dns_build af=%d port=%d %s", inp->sin6_family, htons(inp->sin6_port), inet_ntop(AF_INET6, &inp->sin6_addr, buf, sizeof(buf)));
 
 	_predefine_resource_record[0].domain = "oil.cootail.com";

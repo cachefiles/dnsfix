@@ -58,7 +58,7 @@ struct request_context {
     size_t retries_times;
     u_char request_ident[16];
     u_char request_source[128];
-    struct sockaddr_in request_target;
+    struct sockaddr_in6 request_target;
 };
 
 static int carrier = 0;
@@ -361,6 +361,13 @@ static void stun_do_output(u_int flags, int fildes, size_t ticks, u_char *but, s
 	return;
 }
 
+static int inet_p4ton6(struct in6_addr *in6a, const char *target)
+{
+	char buf[256];
+	snprintf(buf, sizeof(buf), "::ffff:%s", target);
+	return inet_pton(AF_INET6, buf, in6a);
+}
+
 static void load_stun_config(int argc, char *argv[])
 {
 	int i;
@@ -410,9 +417,9 @@ static void load_stun_config(int argc, char *argv[])
 		ctx->retries_times = 0;
 		ctx->flags = STUN_FLAG_CTREAT;
 
-		ctx->request_target.sin_family = AF_INET;
-		ctx->request_target.sin_port   = htons(d_port);
-		ctx->request_target.sin_addr.s_addr =  target;
+		ctx->request_target.sin6_family = AF_INET6;
+		ctx->request_target.sin6_port   = htons(d_port);
+		inet_p4ton6(&ctx->request_target.sin6_addr, target);
 
 		fprintf(stderr, "%s ", argv[i]);
 
@@ -458,19 +465,19 @@ int main(int argc, char *argv[])
 	size_t last_idle;
 	size_t last_ticks;
 	struct sockaddr yours;
-	struct sockaddr_in mime;
+	struct sockaddr_in6 mime;
 
 #ifdef WIN32
 	WSADATA data;
 	WSAStartup(0x101, &data);
 #endif
 
-	fildes = socket(AF_INET, SOCK_DGRAM, 0);
+	fildes = socket(AF_INET6, SOCK_DGRAM, 0);
 	assert(fildes != -1);
 
-	mime.sin_family = AF_INET;
-	mime.sin_port   = htons(9000);
-	mime.sin_addr.s_addr = 0;
+	mime.sin6_family = AF_INET6;
+	mime.sin6_port   = htons(9000);
+	mime.sin6_addr   = in6addr_any;
 
 	for (i = 1; i < argc; i++) {
 		if (0 == strncmp(argv[i], "-p", 2)) {
@@ -486,7 +493,7 @@ int main(int argc, char *argv[])
 				argv[i] = NULL;
 			}
 
-			mime.sin_port = htons(d_port);
+			mime.sin6_port = htons(d_port);
 		} else if (0 == strncmp(argv[i], "-h", 2)) {
 			fprintf(stderr, "%s [options] <server-list>\n", argv[0]);
 			fprintf(stderr, "\t-p <port> source port\n");

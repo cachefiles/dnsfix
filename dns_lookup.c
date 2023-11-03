@@ -26,6 +26,8 @@
 #define closesocket close
 #endif
 
+static char addrbuf[256];
+#define ntop6(addr) inet_ntop(AF_INET6, &addr, addrbuf, sizeof(addrbuf))
 
 struct root_server {
 	char domain[32];
@@ -115,9 +117,9 @@ static int hold_to_cache(struct dns_resource *res, size_t count)
 		f = res + i;
 
 		int target = *(int *)f->value;
-		if (f->type == NSTYPE_A && lookupRoute(htonl(target)) == 0) {
-			fprintf(stderr, "china domain detect\n");
-			exit(0);
+		if (f->type == NSTYPE_A && lookupRoute4(htonl(target)) == 0) {
+			// fprintf(stderr, "china domain detect\n");
+			// exit(0);
 		}
 
 		int found = 0;
@@ -160,7 +162,23 @@ static int search(const char *domain, struct dns_resource p[], size_t l)
 #define NSFLAG_QR    0x8000
 #define NSFLAG_AA    0x0400
 
-static int fetch_resource(const char *domain, int type, struct in_addr *server, struct dns_resource p[], size_t start, size_t l, const char *server_name)
+static const char *inet_4to6(void *v6ptr, const void *v4ptr)
+{
+    uint8_t *v4 = (uint8_t *)v4ptr;
+    uint8_t *v6 = (uint8_t *)v6ptr;
+
+    memset(v6, 0, 10);
+    v6[10] = 0xff;
+    v6[11] = 0xff;
+
+    v6[12] = v4[0];
+    v6[13] = v4[1];
+    v6[14] = v4[2];
+    v6[15] = v4[3];
+    return "";
+}
+
+static int fetch_resource(const char *domain, int type, const struct in6_addr *server, struct dns_resource p[], size_t start, size_t l, const char *server_name)
 {
 	int i;
 	int len;
@@ -169,7 +187,7 @@ static int fetch_resource(const char *domain, int type, struct in_addr *server, 
 	struct dns_question *que;
 	struct dns_resource *res;
 	struct dns_parser parser = {};
-	struct sockaddr_in dest = {};
+	struct sockaddr_in6 dest = {};
 
 	parser.head.flags = 0;
 	parser.head.question = 1;
@@ -178,17 +196,17 @@ static int fetch_resource(const char *domain, int type, struct in_addr *server, 
 	que->type   = type;
 	que->klass  = NSCLASS_INET;
 
-	sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+	sockfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	
 	parser.head.ident = random();
 	len = dns_build(&parser, buf, sizeof(buf));
 
-	dest.sin_family = AF_INET;
-	dest.sin_port   = htons(53);
-	dest.sin_addr   = *server;
+	dest.sin6_family = AF_INET6;
+	dest.sin6_port   = htons(53);
+	dest.sin6_addr   = *server;
 
 	len = sendto(sockfd, buf, len, 0, (struct sockaddr *)&dest, sizeof(dest));
-	fprintf(stderr, "domain=%s send=%d to=%s %s\n", domain, len, inet_ntoa(dest.sin_addr), server_name);
+	fprintf(stderr, "domain=%s send=%d to=%s %s\n", domain, len, ntop6(dest.sin6_addr), server_name);
 
 	socklen_t destlen = sizeof(dest);
 	len = recvfrom(sockfd, buf, sizeof(buf), 0, (struct sockaddr *)&dest, &destlen);
@@ -360,8 +378,16 @@ static int query_resource(const char *domain, int type, struct dns_resource p[],
 		res->ttl = 0;
 
 		oc = c;
-		if (res->type == NSTYPE_A)
-			c = fetch_resource(domain, type, (struct in_addr *)res->value, p, c, l, res->domain);
+		if (res->type == NSTYPE_A) {
+			struct in6_addr dest_addr;
+			inet_4to6(&dest_addr, res->value);
+			c = fetch_resource(domain, type, &dest_addr, p, c, l, res->domain);
+		}
+
+		if (res->type == NSTYPE_AAAA) {
+			const struct in6_addr *dest_addr = (const struct in6_addr *)res->value;
+			c = fetch_resource(domain, type, &dest_addr, p, c, l, res->domain);
+		}
 
 		if (c == 0) break;
 

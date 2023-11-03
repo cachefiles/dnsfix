@@ -181,7 +181,7 @@ int main(int argc, char *argv[])
 		}
 
 		if (FD_ISSET(outfd, &readfds)) {
-			LOG_DEBUG("outfd is readable");
+			// LOG_DEBUG("outfd is readable");
 			addrl = sizeof(myaddr);
 			count = recvfrom(outfd, buf, sizeof(buf), 0, paddr, &addrl);
 			assert(count > 0);
@@ -189,7 +189,7 @@ int main(int argc, char *argv[])
 		}
 
 		if (FD_ISSET(sockfd, &readfds)) {
-			LOG_DEBUG("sockfd is readable");
+			// LOG_DEBUG("sockfd is readable");
 			addrl = sizeof(myaddr6);
 			count = recvfrom(sockfd, buf, sizeof(buf), 0, paddr6, &addrl);
 			assert(count > 0);

@@ -36,6 +36,8 @@ LOCAL_TARGETS = dns_lookup dnsfixd
 
 .PHONY: all
 all: $(LOCAL_TARGETS) stunc dns_res_trd dns_mod_trd dns_mod_gfw dns_echo dns_resolver_ng dns_mod_access udp_ixd
+LOCAL_TARGETS = 
+
 CFLAGS := $(LOCAL_CFLAGS)
 CXXFLAGS := $(LOCAL_CXXFLAGS)
 

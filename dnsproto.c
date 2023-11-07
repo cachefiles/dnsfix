@@ -705,3 +705,69 @@ int cache_put(struct dns_resource *ress, size_t count)
 
 	return 0;
 }
+
+static int nstrtab = 0;
+static char *pstrtab[10240];
+static char _strbuf[1024 * 1024];
+static char *lastsym = _strbuf;
+
+#if 0
+static char *cache_lookup_domain(const char *domain)
+{
+	int i;
+
+	for (i = 0; i < nstrtab; i++) {
+		if (strcasecmp(domain, pstrtab[i]) == 0)
+			return pstrtab[i];
+	}
+
+	return NULL;
+}
+#endif
+
+static const char *cache_add_domain(const char *domain)
+{
+	int i, n;
+	char *self = NULL;
+	char *limit = _strbuf + sizeof(_strbuf);
+
+	for (i = 0; i < nstrtab; i++) {
+		if (strcasecmp(domain, pstrtab[i]) == 0)
+			return pstrtab[i];
+	}
+
+	if (lastsym == limit || nstrtab >= 10240) {
+		assert(0);
+		return NULL;
+	}
+
+	n = snprintf(lastsym, limit - lastsym, "%s", domain);
+	pstrtab[nstrtab++] = self = lastsym;
+	lastsym += (n + 1);
+
+	return self;
+}
+
+int move_to_cache(struct dns_resource *ress, size_t count)
+{
+	int i;
+	const char ** server;
+	struct dns_resource *res;
+
+	for (i = 0; i < count; i++) {
+		res = &ress[i];
+		res->domain = cache_add_domain(res->domain);
+		switch (res->type) {
+			case NSTYPE_CNAME:
+			case NSTYPE_NS:
+				server = (const char **)res->value;
+				*server = cache_add_domain(*server);
+				break;
+
+			default:
+				break;
+		}
+	}
+
+	return 0;
+}

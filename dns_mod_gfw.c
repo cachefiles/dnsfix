@@ -308,7 +308,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 
 	const char *myzone = strcasestr(p0.question[0].domain, "oil.cootail.com");
 	if (myzone == NULL || strcasecmp(myzone, "oil.cootail.com") || p0.question[0].type == NSTYPE_CNAME) {
-		p0.head.flags |= RCODE_REFUSED;
+		p0.head.flags |= RCODE_NXDOMAIN;
 		p0.head.flags |= NSFLAG_QR;
 		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
 		return 0;
@@ -486,14 +486,19 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		}
 
 		LOG_DEBUG("found=%d %s", found, ntop6(from->sin6_addr));
-		if (found == 2) {
+		if (found != 3) {
 			p0.question[0] = pp->question[0];
+			p0.head.answer = 0;
+			p0.head.author = 0;
+			p0.head.addon = 0;
 
 			p0.head.flags |= NSFLAG_QR;
 			p0.head.flags &= ~NSFLAG_RCODE;
 			p0.head.flags |= RCODE_REFUSED;
 
-			dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+			if (NULL != getenv("REFUSED")) 
+				dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+
 			return -1;
 		}
 	}
@@ -579,10 +584,11 @@ int main(int argc, char *argv[])
 
 	setenv("NAMESERVER", "2408:4009:501::2", 0);
 	setenv("LOCALADDR6", "2001:470:66:22a::2", 0);
+	setenv("ROOTSERVER", "::ffff:192.41.162.30", 0);
 
 	_ain6.sin6_family = AF_INET6;
 	_ain6.sin6_port   = htons(53);
-	inet_pton(AF_INET6, "::ffff:192.41.162.30", &_ain6.sin6_addr); 
+	inet_pton(AF_INET6, getenv("ROOTSERVER"), &_ain6.sin6_addr); 
 
 	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	assert(outfd != -1);

@@ -82,9 +82,9 @@ const static struct subnet_info subnet4_data = {
 	0x08, sizeof(subnet4_data), NS_IPV4, 24, 0, {117, 143, 102, 0}
 };
 
-// vn he-ipv6 prefix 2001:470:35:639::/48
+// vn he-ipv6 prefix 2001:470:35:639::/56
 const static struct subnet_info subnet6_data = {
-	0x08, sizeof(subnet6_data), NS_IPV6, 48, 0, {0x20, 0x01, 0x04, 0x70, 0x00, 0x35, 0x06, 0x39}
+	0x08, sizeof(subnet6_data), NS_IPV6, 56, 53, {0x20, 0x01, 0x04, 0x70, 0x00, 0x35, 0x06, 0x39}
 };
 
 static int contains_subnet(struct dns_parser *p0)
@@ -129,7 +129,7 @@ static int add_client_subnet(struct dns_parser *p0, uint8_t *optbuf, const struc
 	struct dns_resource *res = NULL;
 	struct subnet_info info0 = *info;
 
-	int prefixlen = info->source_netmask + info->scope_netmask;
+	int prefixlen = info->source_netmask;//+ info->scope_netmask;
 	size_t subnet_len = 8 + ((7 + prefixlen) >> 3);
 
 	info0.tag = htons(info->tag);
@@ -373,8 +373,10 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	}
 
 	p0.head.addon = 0;
+#if 0
 	if (p0.question[0].type == NSTYPE_AAAA)
 		add_client_subnet(&p0, optbuf, &subnet6_data);
+#endif
 
 	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
 	if (retval == -1) {

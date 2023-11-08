@@ -978,11 +978,13 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 
 		switch (res->type) {
 			case NSTYPE_A:
+/*
 				inet_4to6(&ipv6_addr, res->value);
 				do_fetch_resource(up, qc->parser.head.ident, que, &ipv6_addr, res->domain);
 				LOG_DEBUG("NSTYPE_A: %s %s\n", res->domain, ntop6(ipv6_addr));
-				res->ttl = 0;
 				if (parallel-- <= 0) return 0;
+*/
+				res->ttl = 0;
 				break;
 
 			case NSTYPE_AAAA:

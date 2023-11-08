@@ -33,26 +33,53 @@ struct root_server {
 	char domain[32];
 	int ttl;
 	char ipv4[32];
+	char ipv6[132];
 };
 
 static struct root_server _root_servers[]= {
-	{"a.root-servers.net", 518400, "198.41.0.4"}, 
-	{"b.root-servers.net", 518400, "199.9.14.201"}, 
-	{"c.root-servers.net", 518400, "192.33.4.12"}, 
-	{"d.root-servers.net", 518400, "199.7.91.13"}, 
-	{"e.root-servers.net", 518400, "192.203.230.10"}, 
-	{"f.root-servers.net", 518400, "192.5.5.241"}, 
-	{"g.root-servers.net", 518400, "192.112.36.4"}, 
-	{"h.root-servers.net", 518400, "198.97.190.53"}, 
-	{"i.root-servers.net", 518400, "192.36.148.17"}, 
-	{"j.root-servers.net", 518400, "192.58.128.30"}, 
-	{"k.root-servers.net", 518400, "193.0.14.129"}, 
-	{"l.root-servers.net", 518400, "199.7.83.42"}, 
-	{"m.root-servers.net", 518400, "202.12.27.33"}, 
+	{"a.root-servers.net", 518400, "198.41.0.4", "2001:503:ba3e::2:30"},
+	{"b.root-servers.net", 518400, "199.9.14.201", "2001:500:200::b"},
+	{"c.root-servers.net", 518400, "192.33.4.12", "2001:500:2::c"},
+	{"d.root-servers.net", 518400, "199.7.91.13", "2001:500:2d::d"},
+	{"e.root-servers.net", 518400, "192.203.230.10", "2001:500:a8::e"},
+	{"f.root-servers.net", 518400, "192.5.5.241", "2001:500:2f::f"},
+	{"g.root-servers.net", 518400, "192.112.36.4", "2001:500:12::d0d"},
+	{"h.root-servers.net", 518400, "198.97.190.53", "2001:500:1::53"},
+	{"i.root-servers.net", 518400, "192.36.148.17", "2001:7fe::53"},
+	{"j.root-servers.net", 518400, "192.58.128.30", "2001:503:c27::2:30"},
+	{"k.root-servers.net", 518400, "193.0.14.129", "2001:7fd::1"},
+	{"l.root-servers.net", 518400, "199.7.83.42", "2001:500:9f::42"},
+	{"m.root-servers.net", 518400, "202.12.27.33", "2001:dc3::35"}
 };
 
 #define ARRAY_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
-#define NSCLASS_INET 1
+
+static int build_root_server6(struct dns_resource p[], size_t l)
+{
+	int i;
+	int nserver = ARRAY_SIZE(_root_servers);
+
+	if (nserver > l)
+		nserver = l;
+
+	struct dns_resource tpl =  {
+		.type = NSTYPE_AAAA,
+		.klass = NSCLASS_INET,
+		.ttl = 518400,
+		.len = 4,
+		.flags = 0,
+		.domain = "dummy",
+		.value = {}
+	};
+
+	for (i = 0; i < nserver; i++) {
+		p[i] = tpl;
+		p[i].domain = _root_servers[i].domain;
+		inet_pton(AF_INET6, _root_servers[i].ipv6, p[i].value);
+	}
+
+	return nserver;
+}
 
 static int build_root_server(struct dns_resource p[], size_t l)
 {
@@ -103,7 +130,9 @@ static int lookup_cache(const char *domain, int type, struct dns_resource p[], s
 		return count;
 	}
 
-	return build_root_server(p, l);
+	assert (l > 2 * ARRAY_SIZE(_root_servers));
+	count = build_root_server6(p, l);
+	return build_root_server(p + count, l - count);
 }
 
 static int hold_to_cache(struct dns_resource *res, size_t count)
@@ -178,6 +207,22 @@ static const char *inet_4to6(void *v6ptr, const void *v4ptr)
     return "";
 }
 
+int wait_readable(int sockfd, int millsec)
+{
+	int check;
+	fd_set readfds;
+	struct timeval timeout = {
+		.tv_sec = millsec/1000,
+		.tv_usec = (millsec % 1000) * 1000
+	};
+
+	FD_ZERO(&readfds);
+	FD_SET(sockfd, &readfds);
+
+	check = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
+	return check > 0;
+}
+
 static int fetch_resource(const char *domain, int type, const struct in6_addr *server, struct dns_resource p[], size_t start, size_t l, const char *server_name)
 {
 	int i;
@@ -207,6 +252,15 @@ static int fetch_resource(const char *domain, int type, const struct in6_addr *s
 
 	len = sendto(sockfd, buf, len, 0, (struct sockaddr *)&dest, sizeof(dest));
 	fprintf(stderr, "domain=%s send=%d to=%s %s\n", domain, len, ntop6(dest.sin6_addr), server_name);
+	if (len > 0 && !wait_readable(sockfd, 400)) {
+		len = sendto(sockfd, buf, len, 0, (struct sockaddr *)&dest, sizeof(dest));
+		fprintf(stderr, "retry domain=%s send=%d to=%s %s\n", domain, len, ntop6(dest.sin6_addr), server_name);
+	}
+
+	if (len <= 0 || !wait_readable(sockfd, 1000)) {
+		fprintf(stderr, "failure or timeout");
+		return start;
+	}
 
 	socklen_t destlen = sizeof(dest);
 	len = recvfrom(sockfd, buf, sizeof(buf), 0, (struct sockaddr *)&dest, &destlen);
@@ -258,8 +312,8 @@ static int fetch_resource(const char *domain, int type, const struct in6_addr *s
 			}
 		} else if (contains(origin, res->domain) &&
 				res->type == NSTYPE_NS) {
-			const char **ptr = (char **)res->value;
-			// fprintf(stderr, "NS: %s\n", *ptr);
+			const char **ptr = (const char **)res->value;
+			fprintf(stderr, "NS: %s\n", *ptr);
 			if (ans < l) {
 				p[ans] = *res;
 				ans++;
@@ -293,7 +347,7 @@ static int fetch_resource(const char *domain, int type, const struct in6_addr *s
 		} else if (contains(origin, res->domain) &&
 				res->type == NSTYPE_NS) {
 			char **ptr = (char **)res->value;
-			// fprintf(stderr, "NS: %s\n", *ptr);
+			fprintf(stderr, "NS: %s\n", *ptr);
 			if (ans < l) {
 				p[ans] = *res;
 				ans++;
@@ -341,7 +395,6 @@ int filter(struct dns_resource p[], size_t l, size_t count, const char *domain, 
 static int query_resource(const char *domain, int type, struct dns_resource p[], size_t l)
 {
 	int c, i, count = 0;
-	char * dot = NULL;
 	struct dns_resource * res  = NULL;
 
 	c = lookup_cache(domain, type, p, l);
@@ -363,7 +416,7 @@ static int query_resource(const char *domain, int type, struct dns_resource p[],
 		res = p + i;
 		if (res->type == NSTYPE_CNAME &&
 				strcasecmp(domain, res->domain) == 0) {
-			const char **alias = res->value;
+			const char **alias = (const char **)res->value;
 			return query_resource(*alias, type, p, l);
 		}
 	}
@@ -386,13 +439,13 @@ static int query_resource(const char *domain, int type, struct dns_resource p[],
 
 		if (res->type == NSTYPE_AAAA) {
 			const struct in6_addr *dest_addr = (const struct in6_addr *)res->value;
-			c = fetch_resource(domain, type, &dest_addr, p, c, l, res->domain);
+			c = fetch_resource(domain, type, dest_addr, p, c, l, res->domain);
 		}
 
 		if (c == 0) break;
 
 		if (res->type == NSTYPE_NS) {
-			char **alias = res->value;
+			char **alias = (char **)res->value;
 
 			c += count;
 			if (count == 0) {
@@ -416,7 +469,7 @@ static int query_resource(const char *domain, int type, struct dns_resource p[],
 				count++;
 			} else if (res->type == NSTYPE_CNAME &&
 					strcasecmp(domain, res->domain) == 0) {
-				const char **alias = res->value;
+				const char **alias = (const char **)res->value;
 				p[0] = *res;
 				return query_resource(*alias, type, p + 1, l - 1) + 1;
 			}
@@ -444,7 +497,6 @@ int main(int argc, char *argv[])
 
 		for (j = 0; j < c; j++) {
 			res = &answser[j];
-
 			if (res->type == NSTYPE_CNAME) {
 				fprintf(stderr, "CNAME %s -> %s\n", res->domain, *(char **)res->value);
 			} else if (res->type == NSTYPE_A) {

@@ -329,8 +329,20 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 
 	dns_parser_copy(&qc->parser, &p0);
 	p1 = &qc->parser;
-#if 1
-	if (dns_rewrap(p1) == -1) {
+
+	if (p0.question[0].type == NSTYPE_A
+			&& !!getenv("REFUSED_IPV4")) {
+		p0.head.flags |= NSFLAG_QR;
+		p0.head.flags &= ~NSFLAG_RCODE;
+		p0.head.flags |= RCODE_NOTAUTH;
+		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+		return -1;
+	}
+
+	if (getenv("REFUSED_IPV4")) {
+		p1->question[1] = p1->question[0];
+		p0.question[0] = p1->question[1];
+	} else if (dns_rewrap(p1) == -1) {
 		LOG_DEBUG("FROM: %s this is not good", p1->question[0].domain);
 		return -1;
 	}
@@ -338,10 +350,6 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	if (p0.question[0].type != NSTYPE_PTR) {
 		p0.question[0] = p1->question[1];
 	}
-#else
-	p1->question[1] = p1->question[0];
-	p0.question[0] = p1->question[1];
-#endif
 
 	p0.head.flags |= NSFLAG_RD;
 	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
@@ -457,13 +465,14 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		LOG_DEBUG("domain %s %s %s %s", res->domain, pp->question[0].domain, pp->question[1].domain, alias);
 		if (strcasecmp(res->domain, pp->question[1].domain) == 0 &&
 				strcasecmp(alias, pp->question[0].domain) == 0) {
-			memmove(p0.answer, p0.answer + 1, sizeof(p0.answer[0]) * (p0.head.answer - i -1));
-			p0.head.answer = p0.head.answer - i - 1;
+			memmove(p0.answer + i, p0.answer + i + 1, sizeof(p0.answer[0]) * (p0.head.answer - i -1));
+			p0.head.answer = p0.head.answer - 1;
 			found = 1;
 			break;
 		}
 	}
 
+#if 0
 	if (found == 0) {
 		memmove(p0.answer + 1, p0.answer, sizeof(p0.answer[0]) * p0.head.answer);
 		res = &p0.answer[0];
@@ -474,6 +483,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		*(const char **)res->value  = add_domain(&p0, qc->parser.question[1].domain);
 		p0.head.answer++;
 	}
+#endif
 
 #if 1
 	for (i = 0; i < p0.head.answer; i++) {
@@ -523,7 +533,8 @@ int main(int argc, char *argv[])
 #if 0
 	myaddr6.sin6_addr   = in6addr_any;
 #endif
-	inet_pton(AF_INET6, "::ffff:127.0.0.111", &myaddr6.sin6_addr);
+	setenv("BINDLOCAL", "::ffff:127.0.0.111", 0);
+	inet_pton(AF_INET6, getenv("BINDLOCAL"), &myaddr6.sin6_addr);
 	retval = bind(sockfd, paddr6, sizeof(myaddr6));
 	assert(retval != -1);
 

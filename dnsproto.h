@@ -51,7 +51,8 @@
                 
 #define RCODE_NXDOMAIN 3
 #define RCODE_SERVFAIL 2
-#define RCODE_REFUSED  5        
+#define RCODE_REFUSED  5
+#define RCODE_NOTAUTH  9
 #define NSCLASS_INET 0x01
 
 struct dns_header {

@@ -88,7 +88,7 @@ struct dns_parser {
 	char strtab[2048];
 	char *lastptr;
 	const char *strptr[100];
-	uint8_t *comptr[MAX_RECORD_COUNT];
+	uint8_t *comptr[MAX_RECORD_COUNT * 2];
 
 	struct dns_header head;
 	struct dns_question question[MAX_RECORD_COUNT];

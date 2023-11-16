@@ -44,9 +44,9 @@ LDFLAGS := $(LOCAL_LDFLAGS)
 OBJECTS := ncatutil.o dnsproto.o router.o subnet_data.o subnet_api.o
 
 dns_mod_trd: dns_mod_trd.o dnsproto.o subnet_api.o subnet_data.o
-	$(CC) $(LDFLAGS) -o $@ $^ -lresolv
+	$(CC) $(LDFLAGS) -o $@ $^ -lresolv 
 
-dns_resolver_ng: dns_resolver_ng.o dnsproto.o subnet_api.o subnet_data.o
+dns_resolver_ng: dns_resolver_ng.o dnsproto.o subnet_api.o subnet_data.o tx_debug.o
 	$(CC) $(LDFLAGS) -o $@ $^ -lresolv
 
 dns_mod_gfw: dns_mod_gfw.o subnet_api.o subnet_data.o dnsproto.o tx_debug.o

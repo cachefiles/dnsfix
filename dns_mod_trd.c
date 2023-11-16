@@ -215,66 +215,12 @@ static int dns_rewrap(struct dns_parser *p1)
 	}
 
 	assert(ndot >= 2);
-	if (!strcasecmp(dots[(ndot - 2) & 0x7], "cootail.com")) {
+	if (strcasecmp(dots[(ndot - 2) & 0x7], "cootail.com")) {
 		return 0;
 	}
 
-	strcat(optp, ".cootail.com");
-
-	limit = optp - 1;
-	ndot--;
-	optp = dots[ndot & 0x7];
-
-	if (ndot < 1) {
-		LOG_DEBUG("dns_unwrap warning %s XX", title);
-		que1->domain = add_domain(p1, title);
-		return 0;
-	}
-
-	int cc = 0;
-	if (optp + 1 == limit) {
-		limit = dots[ndot & 0x7] -2;
-		ndot--;
-		optp = dots[ndot & 0x7];
-		cc = 1;
-	}
-
-	if (cc == 0 || dns_contains(optp)) {
-		for (; *optp && optp < limit; optp++) {
-			char t = *optp;
-			*optp = *limit;
-			*limit-- = t;
-		}
-
-		if (ndot < 1) {
-			LOG_DEBUG("dns_unwrap ork %s", title);
-			que1->domain = add_domain(p1, title);
-			return 0;
-		}
-
-		limit = dots[ndot & 0x7] -2;
-		ndot--;
-		optp = dots[ndot & 0x7];
-	}
-
-#if 0
-	if (ndot < 1) {
-		LOG_DEBUG("dns_unwrap warning %s", title);
-		que1->domain = add_domain(p1, title);
-		return 0;
-	}
-#endif
-
-	char t = *optp;
-	memmove(optp, optp + 1, limit - optp);
-	*limit = t;
-
-	LOG_DEBUG("dns_unwrap title=%s cc=%d", title, cc);
-	if (que1->type == NSTYPE_PTR) {
-		que1->domain = add_domain(p1, que->domain);
-		return 0;
-	}
-
+	dots[(ndot - 2) & 0x7][-1] = 0;
+	LOG_DEBUG("dns_unwrap warning %s XX", title);
 	que1->domain = add_domain(p1, title);
 	return 0;
 }
@@ -457,18 +403,20 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 	for (i = 0; i < p0.head.answer; i++) {
 		res = &p0.answer[i];
-		if (res->type != NSTYPE_CNAME) {
-			continue;
-		}
-
-		const char *alias = *(const char **)res->value;
-		LOG_DEBUG("domain %s %s %s %s", res->domain, pp->question[0].domain, pp->question[1].domain, alias);
-		if (strcasecmp(res->domain, pp->question[1].domain) == 0 &&
-				strcasecmp(alias, pp->question[0].domain) == 0) {
-			memmove(p0.answer + i, p0.answer + i + 1, sizeof(p0.answer[0]) * (p0.head.answer - i -1));
-			p0.head.answer = p0.head.answer - 1;
-			found = 1;
-			break;
+		if (res->type == NSTYPE_CNAME) {
+			const char *alias = *(const char **)res->value;
+			LOG_DEBUG("domain %s %s %s %s", res->domain, pp->question[0].domain, pp->question[1].domain, alias);
+			if (strcasecmp(res->domain, pp->question[1].domain) == 0 &&
+					strcasecmp(alias, pp->question[0].domain) == 0) {
+				memmove(p0.answer + i, p0.answer + i + 1, sizeof(p0.answer[0]) * (p0.head.answer - i -1));
+				p0.head.answer = p0.head.answer - 1;
+				found = 1;
+				break;
+			}
+		} else {
+			if (strcasecmp(res->domain, pp->question[1].domain) == 0) {
+				res->domain = pp->question[0].domain;
+			}
 		}
 	}
 

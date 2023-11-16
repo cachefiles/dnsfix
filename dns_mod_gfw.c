@@ -168,7 +168,10 @@ static int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
 {
     static uint8_t _qc_hold[2048];
     size_t len  = dns_build(src, _qc_hold, sizeof(_qc_hold));
-    return dns_parse(dst, _qc_hold, len) == NULL;
+	assert(len > 0);
+    int isok = dns_parse(dst, _qc_hold, len) == NULL;
+	assert(isok == 0);
+	return isok;
 }
 
 static int dns_contains(const char *domain)
@@ -204,7 +207,7 @@ static int dns_rewrap(struct dns_parser *p1)
 	que1 = &p1->question[1];
 
 	int ndot = 0;
-	char *optp;
+	char *optp, *limit;
 	char *dots[8] = {}, title[256];
 
 	// LOG_DEBUG("suffixes: %s %d", que->domain, que->type);
@@ -213,16 +216,19 @@ static int dns_rewrap(struct dns_parser *p1)
 	}
 
 	optp = title;
+	limit = title + sizeof(title);
 	dots[ndot & 0x7] = title;
 	for (domain = que->domain; *domain; domain++) {
 		switch(*domain) {
 			case '.':
 				if (optp > dots[ndot & 0x7]) ndot++;
+				assert(optp < limit);
 				*optp++ = *domain;
 				dots[ndot & 0x7] = optp;
 				break;
 
 			default:
+				assert(optp < limit);
 				*optp++ = *domain;
 				break;
 		}
@@ -231,23 +237,13 @@ static int dns_rewrap(struct dns_parser *p1)
 	*optp = 0;
 	if (optp > dots[ndot & 0x7]) ndot++;
 
-	if (ndot < 3) {
+	if (ndot <= 3) {
 		return -1;
 	}
 
 	if (ndot > 3 && !strcasecmp(dots[(ndot - 3) & 0x7], "oil.cootail.com")) {
 		*que1 = *que;
 		p1->addon[0].domain = add_domain(p1, "oil.cootail.com");
-		dots[(ndot - 3) & 0x7][-1] = 0;
-		que1->domain = add_domain(p1, title);
-		assert(que1->domain);
-		p1->head.question = 2;
-		return 0;
-	}
-
-	if (ndot > 3 && !strcasecmp(dots[(ndot - 3) & 0x7], "iii.cootail.com")) {
-		*que1 = *que;
-		p1->addon[0].domain = add_domain(p1, "iii.cootail.com");
 		dots[(ndot - 3) & 0x7][-1] = 0;
 		que1->domain = add_domain(p1, title);
 		assert(que1->domain);
@@ -265,7 +261,7 @@ static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockadd
 	const struct sockaddr *to = (const struct sockaddr *)inp;
 
 	len = dns_build(parser, _hold, sizeof(_hold));
-
+	assert(len > 0);
 
 	if (len != -1)
 		len = sendto(outfd, _hold, len, 0, to, tolen);
@@ -466,7 +462,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 	pp = &qc->parser;
 	if (pp->head.ident != p0.head.ident || pp->head.question != 2) {
-		LOG_DEBUG("FROM: %s XX unexpected response", ntop6(from->sin6_addr));
+		LOG_DEBUG("FROM: %s XX unexpected response: %d", ntop6(from->sin6_addr), pp->head.question);
 		return -1;
 	}
 
@@ -635,10 +631,6 @@ int main(int argc, char *argv[])
 	_predefine_resource_record[0].type   = NSTYPE_NS;
 	*(char **)_predefine_resource_record[0].value  = "ns2.cootail.com";
 
-	_predefine_resource_record[1].domain = "iii.cootail.com";
-	_predefine_resource_record[1].type = NSTYPE_NS;
-	*(char **)_predefine_resource_record[1].value  = "ns2.cootail.com";
-
 	do {
 		FD_ZERO(&readfds);
 		FD_SET(outfd, &readfds);
@@ -659,7 +651,7 @@ int main(int argc, char *argv[])
 		}
 
 		if (FD_ISSET(sockfd, &readfds)) {
-			addrl = sizeof(myaddr);
+			addrl = sizeof(myaddr6);
 			count = recvfrom(sockfd, buf, sizeof(buf), 0, paddr1, &addrl);
 			count > 0 || LOG_DEBUG("sockfd is readable: %d", count);
 			assert(count > 0);

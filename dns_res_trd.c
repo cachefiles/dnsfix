@@ -522,6 +522,29 @@ static subnet_t *lookupRoute(const void *block, int type)
 	return NULL;
 }
 
+int cdn_is_akamai(const char *domain)
+{
+	// www.apple.com.edgekey.net.globalredir.akadns.net. 3388 IN CNAME	e6858.dscx.akamaiedge.net.
+	// e6858.dscx.akamaiedge.net. 20	IN	A	23.59.247.25
+
+	const char *suffixies = strstr(domain, "akamaiedge.net");
+	if (suffixies && strcmp(suffixies, "akamaiedge.net") == 0) {
+		return 1;
+	}
+
+	suffixies = strstr(domain, "akadns.net");
+	if (suffixies && strcmp(suffixies, "akadns.net") == 0) {
+		return 1;
+	}
+
+	suffixies = strstr(domain, "akamai.net");
+	if (suffixies && strcmp(suffixies, "akamai.net") == 0) {
+		return 1;
+	}
+
+	return 0;
+}
+
 int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
 {
 	struct dns_parser p0;
@@ -576,6 +599,8 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 				res = &p0.author[i];
 				if (res->type == NSTYPE_SOA) {
 					soa_nameserver = *(const char **)res->value;
+					if (cdn_is_akamai(soa_nameserver))
+						qc->is_china_domain = 1;
 					break;
 				}
 			}
@@ -595,6 +620,12 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 		for (i = 0; i < p0.head.answer; i++) {
 			res = &p0.answer[i];
+			if (res->type == NSTYPE_CNAME && (cdn_is_akamai(res->domain)
+						||  cdn_is_akamai(*(const char **)res->value))) {
+				qc->is_china_domain = 1;
+				break;
+			}
+
 			if (res->type == NSTYPE_A || res->type == NSTYPE_AAAA) {
 				if (NULL == lookupRoute(res->value, res->type)) {
 					qc->is_china_domain = 1;
@@ -620,6 +651,12 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 	for (i = 0; i < p0.head.answer; i++) {
 		res = &p0.answer[i];
+		if (res->type == NSTYPE_CNAME && (cdn_is_akamai(res->domain)
+					||  cdn_is_akamai(*(const char **)res->value))) {
+			qc->is_china_domain = 1;
+			break;
+		}
+
 		if ((res->type == NSTYPE_A || res->type == NSTYPE_AAAA)
 				&& NULL == lookupRoute(res->value, res->type)) {
 			dns_parser_copy(&qc->ecs_parser, &p0);

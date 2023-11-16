@@ -1,6 +1,6 @@
 #!/bin/bash
 
-test -f delegated-apnic-latest || wget https://ftp.apnic.net/stats/apnic/delegated-apnic-latest
+test -f delegated-apnic-latest || wget -4 https://ftp.apnic.net/stats/apnic/delegated-apnic-latest
 
 grep "[A-Z][A-Z]|ipv4|" delegated-apnic-latest |grep -v CN|awk -F '|' '{print $4 "/" $5;}' > list-ipv4-without-cn.txt
 grep "[A-Z][A-Z]|ipv6|" delegated-apnic-latest |grep -v CN|awk -F '|' '{print $4 "/" $5;}' > list-ipv6-without-cn.txt

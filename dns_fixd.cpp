@@ -118,22 +118,23 @@ struct root_server {
     char domain[32];
     int ttl;
     char ipv4[32];
+	char ipv6[32];
 };
 
 static struct root_server _root_servers[]= {
-    {"a.root-servers.net", 518400, "198.41.0.4"},
-    {"b.root-servers.net", 518400, "199.9.14.201"},
-    {"c.root-servers.net", 518400, "192.33.4.12"},
-    {"d.root-servers.net", 518400, "199.7.91.13"},
-    {"e.root-servers.net", 518400, "192.203.230.10"},
-    {"f.root-servers.net", 518400, "192.5.5.241"},
-    {"g.root-servers.net", 518400, "192.112.36.4"},
-    {"h.root-servers.net", 518400, "198.97.190.53"},
-    {"i.root-servers.net", 518400, "192.36.148.17"},
-    {"j.root-servers.net", 518400, "192.58.128.30"},
-    {"k.root-servers.net", 518400, "193.0.14.129"},
-    {"l.root-servers.net", 518400, "199.7.83.42"},
-    {"m.root-servers.net", 518400, "202.12.27.33"},
+	{"a.root-servers.net", 518400, "198.41.0.4", "2001:503:ba3e::2:30"},
+	{"b.root-servers.net", 518400, "199.9.14.201", "2001:500:200::b"},
+	{"c.root-servers.net", 518400, "192.33.4.12", "2001:500:2::c"},
+	{"d.root-servers.net", 518400, "199.7.91.13", "2001:500:2d::d"},
+	{"e.root-servers.net", 518400, "192.203.230.10", "2001:500:a8::e"},
+	{"f.root-servers.net", 518400, "192.5.5.241", "2001:500:2f::f"},
+	{"g.root-servers.net", 518400, "192.112.36.4", "2001:500:12::d0d"},
+	{"h.root-servers.net", 518400, "198.97.190.53", "2001:500:1::53"},
+	{"i.root-servers.net", 518400, "192.36.148.17", "2001:7fe::53"},
+	{"j.root-servers.net", 518400, "192.58.128.30", "2001:503:c27::2:30"},
+	{"k.root-servers.net", 518400, "193.0.14.129", "2001:7fd::1"},
+	{"l.root-servers.net", 518400, "199.7.83.42", "2001:500:9f::42"},
+	{"m.root-servers.net", 518400, "202.12.27.33", "2001:dc3::35"}
 };
 
 #define ARRAY_SIZE(arr) (sizeof(arr)/sizeof(arr[0]))
@@ -143,6 +144,16 @@ static struct dns_resource _tpl0 =  {
 	.klass = NSCLASS_INET,
 	.ttl = 518400,
 	.len = 4,
+	.flags = 0,
+	.domain = "dummy",
+	.value = {}
+};
+
+static struct dns_resource _tpl6 =  {
+	.type = NSTYPE_AAAA,
+	.klass = NSCLASS_INET,
+	.ttl = 518400,
+	.len = 16,
 	.flags = 0,
 	.domain = "dummy",
 	.value = {}
@@ -614,11 +625,11 @@ static int do_fetch_resource(dns_udp_context_t *up, int ident, struct dns_questi
 
 	target.sin6_family = AF_INET6;
 	target.sin6_port   = htons(53);
-	memcpy(&target.sin6_addr, server, 12);
+	memcpy(&target.sin6_addr, server, 16);
 
 	// inet_4to6(&target.sin6_addr, server);
 	size_t slen = sendto(up->outfd, buf, len, 0, (struct sockaddr *)&target, sizeof(target));
-	LOG_DEBUG("do_fetch_resource sendto %s/%s data %d %d %s %d", server_name, ntop6(server), len, slen, que->domain, que->type);
+	LOG_DEBUG("do_fetch_resource sendto %s/%s data %d %d %s %d", server_name, ntop6(target.sin6_addr), len, slen, que->domain, que->type);
 }
 
 static int dns_query_append(struct query_context_t *qc, struct dns_resource *answer, size_t count)
@@ -978,18 +989,16 @@ static int dns_query_continue(dns_udp_context_t *up, struct query_context_t *qc,
 
 		switch (res->type) {
 			case NSTYPE_A:
-/*
 				inet_4to6(&ipv6_addr, res->value);
 				do_fetch_resource(up, qc->parser.head.ident, que, &ipv6_addr, res->domain);
 				LOG_DEBUG("NSTYPE_A: %s %s\n", res->domain, ntop6(ipv6_addr));
 				if (parallel-- <= 0) return 0;
-*/
 				res->ttl = 0;
 				break;
 
 			case NSTYPE_AAAA:
 				do_fetch_resource(up, qc->parser.head.ident, que, (struct in6_addr *)res->value, res->domain);
-				LOG_DEBUG("NSTYPE_A: %s %s\n", res->domain, ntop6(res->value));
+				LOG_DEBUG("NSTYPE_AAAA: %s %s\n", res->domain, ntop6(res->value));
 				res->ttl = 0;
 				if (parallel-- <= 0) return 0;
 				break;
@@ -1099,7 +1108,7 @@ static int do_query_resource(dns_udp_context_t *up, struct query_context_t *qc, 
 
 			case NSTYPE_AAAA:
 				do_fetch_resource(up, qc->parser.head.ident, que, (struct in6_addr*)res->value, res->domain);
-				LOG_DEBUG("NSTYPE_A: (0) %s %s\n", res->domain, ntop6(res->value));
+				LOG_DEBUG("NSTYPE_AAAA: (0) %s %s\n", res->domain, ntop6(res->value));
 				res->ttl = 0;
 				if (parallel-- <= 0) return 0;
 				return 0;
@@ -1429,16 +1438,25 @@ int txdns_create()
 	tx_aincb_active(&up->outgoing, &up->task);
 
 	struct dns_resource ns_root = {};
+	struct dns_resource ns_root6 = {};
 	for (int j = 0; j < ARRAY_SIZE(_root_servers); j++) {
 		struct root_server *rs = &_root_servers[j];
+
 		ns_root = _tpl0;
 		ns_root.domain = rs->domain;
 
-		in_addr_t target = inet_addr(rs->ipv4);
-		memcpy(ns_root.value, &target, sizeof(target)); 
+		inet_pton(AF_INET, rs->ipv4, ns_root.value);
 
 		cache_put(&ns_root, 1);
 		answer_cache_put(&ns_root, 1);
+
+		ns_root6 = _tpl6;
+		ns_root6.domain = rs->domain;
+
+		inet_pton(AF_INET6, rs->ipv6, ns_root.value);
+
+		cache_put(&ns_root6, 1);
+		answer_cache_put(&ns_root6, 1);
 	}
 
 	return 0;

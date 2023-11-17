@@ -51,7 +51,7 @@ struct dns_query_context {
 	struct dns_parser def_parser;
 };
 
-static struct dns_query_context _orig_list[0xfff];
+static struct dns_query_context _orig_list[0x1000];
 
 static int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
 {
@@ -71,11 +71,6 @@ struct subnet_info {
 
 #define NS_IPV6 2
 #define NS_IPV4 1
-#if __BYTE_ORDER == __LITTLE_ENDIAN
-#define N16(x) __bswap_constant_16(x)
-#else
-#define N16(x) (x)
-#endif
 
 // china mobile 117.143.102.0/24
 const static struct subnet_info subnet4_data = {
@@ -744,6 +739,8 @@ check_flush:
 	return 0;
 }
 
+#define get_score_id(ifname) if_nametoindex(ifname)
+
 int main(int argc, char *argv[])
 {
 	int retval;
@@ -753,6 +750,7 @@ int main(int argc, char *argv[])
 
 	struct sockaddr_in6 myaddr6;
 	struct sockaddr * paddr6 = (struct sockaddr *)&myaddr6;
+	setenv("BINDLOCAL", "::ffff:127.0.0.111", 0);
 
 	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	assert(outfd != -1);
@@ -769,6 +767,18 @@ int main(int argc, char *argv[])
 	myaddr6.sin6_family = AF_INET6;
 	myaddr6.sin6_port   = htons(53);
 	myaddr6.sin6_addr   = in6addr_any;
+
+	char _dummy[256], *ifp;
+	strcpy(_dummy, getenv("BINDLOCAL"));
+	if (NULL != (ifp = strchr(_dummy, '%'))) {
+		*ifp ++ = 0;
+		myaddr6.sin6_scope_id = get_score_id(ifp);
+		inet_pton(AF_INET6, _dummy, &myaddr6.sin6_addr);
+	} else {
+		myaddr6.sin6_scope_id = 0;
+		inet_pton(AF_INET6, _dummy, &myaddr6.sin6_addr);
+	}
+
 	retval = bind(sockfd, paddr6, sizeof(myaddr6));
 	assert(retval != -1);
 

@@ -163,7 +163,7 @@ struct dns_query_context {
 	struct dns_parser parser;
 };
 
-static struct dns_query_context _orig_list[0xfff];
+static struct dns_query_context _orig_list[0x1000];
 
 #define PREFERENCE_LOCAL_NAT64  100
 #define PREFERENCE_REMOTE_NAT64 4
@@ -193,7 +193,7 @@ struct dns_score_board {
 	int preference;
 };
 
-static struct dns_score_board _hash_src[0xffff];
+static struct dns_score_board _hash_src[0x10000];
 
 static int dns_parser_copy(struct dns_parser *dst, const struct dns_parser *src)
 {
@@ -217,6 +217,97 @@ static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockadd
 
 	LOG_DEBUG("dns_build bytes %d %d %d %s", len, inp->sin6_family, htons(inp->sin6_port), ntop6(inp->sin6_addr));
 	return len;
+}
+
+struct subnet_info {
+	uint16_t tag; // 0x0008
+	uint16_t len;
+	uint16_t family;
+	uint8_t source_netmask;
+	uint8_t scope_netmask;
+	uint8_t addr[16];
+};
+
+#define NS_IPV6 2
+#define NS_IPV4 1
+
+// china mobile 117.143.102.0/24
+const static struct subnet_info subnet4_data = {
+	0x08, sizeof(subnet4_data), NS_IPV4, 24, 0, {117, 143, 102, 0}
+};
+
+static int add_client_subnet(struct dns_parser *p0, uint8_t *optbuf, const struct subnet_info *info)
+{
+#ifndef DISABLE_SUBNET
+
+	int have_edns = 0;
+	struct dns_resource *res = NULL;
+	struct subnet_info info0 = *info;
+
+	int prefixlen = info->source_netmask;//+ info->scope_netmask;
+	size_t subnet_len = 8 + ((7 + prefixlen) >> 3);
+
+	info0.tag = htons(info->tag);
+	info0.family = htons(info->family);
+	info0.len    = htons(4 + ((7 + prefixlen) >> 3));
+
+	for (int i = 0; i < p0->head.addon; i++) {
+		res = &p0->addon[i];
+		if (res->type != NSTYPE_OPT) {
+			continue;
+		}
+
+		if (res->domain == NULL || *res->domain == 0) {
+			size_t len = res->len;
+			const uint8_t * valp = *(const uint8_t **)res->value;
+			struct tagheader {uint16_t tag; uint16_t len; } tag0;
+
+			while (len > sizeof(tag0)) {
+				memcpy(&tag0, valp, sizeof(tag0));
+				if (len < sizeof(tag0) + htons(tag0.len)) break;
+				const uint8_t *hold = valp;
+				valp += sizeof(tag0) + htons(tag0.len);
+				len -= (sizeof(tag0) + htons(tag0.len));
+				if (tag0.tag == htons(0x0008)) {
+					const uint8_t * valp0 = *(const uint8_t **)res->value;
+					memcpy(optbuf, valp0, (hold - valp0));
+					memcpy(optbuf + (hold - valp0), valp, len);
+
+					memcpy(optbuf + (hold - valp0) + len, &info0, subnet_len);
+					*(void **)res->value = optbuf;
+					res->len = len + (hold - valp0) + subnet_len;
+					have_edns = 1;
+					break;
+				}
+			}
+
+			if (have_edns == 0) {
+				const uint8_t * valp = *(const uint8_t **)res->value;
+
+				memcpy(optbuf, &info0, subnet_len);
+				memcpy(optbuf + subnet_len, valp, res->len);
+
+				*(void **)res->value = optbuf;
+				res->len += subnet_len;
+				have_edns = 1;
+			}
+		}
+	}
+
+	if (p0->head.addon < MAX_RECORD_COUNT && have_edns == 0) {
+		res = &p0->addon[p0->head.addon++];
+
+		res->domain = "";
+		res->klass = 0x1000;
+		res->type = NSTYPE_OPT;
+		res->ttl  = 0;
+		res->len  = subnet_len;
+		memcpy(optbuf, &info0, subnet_len);
+		*(const void **)res->value = optbuf; 
+	}
+#endif
+
+	return 0;
 }
 
 static uint16_t dns_hash(const void *up, const char *domain)
@@ -288,9 +379,15 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	}
 
 	p0.head.flags |= NSFLAG_RD;
-	retval = dns_sendto(ctx->outfd, &p0, ctx->dnslocal, ctx->dnslen1);
+
+	char optbuf[124];
+	struct dns_parser u1 = {};
+	dns_parser_copy(&u1, &p0);
+	add_client_subnet(&u1, optbuf, &subnet4_data);
+
+	retval = dns_sendto(ctx->outfd, &u1, ctx->dnslocal, ctx->dnslen1);
 	if (retval == -1) {
-		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsremote);
+		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnslocal);
 		return 0;
 	}
 
@@ -300,7 +397,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 
 	retval = sendto(ctx->outfd, buf, count, 0, ctx->dnsremote, ctx->dnslen);
 	if (retval == -1) {
-		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnslocal);
+		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsremote);
 		return 0;
 	}
 

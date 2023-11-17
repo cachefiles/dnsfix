@@ -437,7 +437,7 @@ struct query_context_t {
 
 static int _qc_next = 0;
 static uint8_t _qc_hold[2048];
-static struct query_context_t _query_list[0xfff];
+static struct query_context_t _query_list[0xfff +1];
 
 int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
 {

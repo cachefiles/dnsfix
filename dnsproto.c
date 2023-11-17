@@ -554,7 +554,6 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 	}
 
 	return dotp - frame;
-
 }
 
 static int nstrtab = 0;

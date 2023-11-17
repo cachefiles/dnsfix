@@ -35,7 +35,7 @@ struct dns_context {
 
     socklen_t addrlen;
     struct sockaddr *last;
-    struct sockaddr_in6 last6[0xffff];
+    struct sockaddr_in6 last6[0xffff + 1];
 };
 
 #define NSFLAG_QR    0x8000

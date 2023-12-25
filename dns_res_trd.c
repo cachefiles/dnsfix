@@ -42,13 +42,16 @@ struct dns_context {
 	struct sockaddr *ecsaddr;
 };
 
+struct zip_parser {
+	char buf[1500];
+	int len;
+};
+
 struct dns_query_context {
 	int is_china_domain;
 	int is_nonchina_domain;
 	struct sockaddr_in6 from;
-	struct dns_parser parser;
-	struct dns_parser ecs_parser;
-	struct dns_parser def_parser;
+	struct zip_parser parser, ecs_parser, def_parser;
 };
 
 static struct dns_query_context _orig_list[0x1000];
@@ -258,6 +261,7 @@ static int dns_unwrap(struct dns_parser *p1)
 	if (ndot < 1) {
 		LOG_DEBUG("dns_unwrap warning %s", title);
 		que1->domain = add_domain(p1, title);
+		p1->head.question++;
 		return 0;
 	}
 
@@ -280,6 +284,7 @@ static int dns_unwrap(struct dns_parser *p1)
 		if (ndot < 1) {
 			LOG_DEBUG("dns_unwrap ork %s", title);
 			que1->domain = add_domain(p1, title);
+			p1->head.question++;
 			return 0;
 		}
 
@@ -293,6 +298,7 @@ static int dns_unwrap(struct dns_parser *p1)
 	if (ndot < 1) {
 		LOG_DEBUG("dns_unwrap warning %s", title);
 		que1->domain = add_domain(p1, title);
+		p1->head.question++;
 		return 0;
 	}
 #endif
@@ -304,6 +310,7 @@ static int dns_unwrap(struct dns_parser *p1)
 
 	LOG_DEBUG("zz dns_unwrap %s %d", title, cc);
 	que1->domain = add_domain(p1, title);
+	p1->head.question++;
 	return 0;
 }
 
@@ -344,17 +351,20 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	int offset = (p0.head.ident & 0xfff);
 
 	struct dns_parser *p1 = NULL;
+	struct dns_parser parser = {};
 	struct dns_query_context *qc = &_orig_list[offset];
 	memset(qc, 0, sizeof(*qc));
 	qc->from = *from;
 
-	dns_parser_copy(&qc->parser, &p0);
-	p1 = &qc->parser;
+	dns_parser_copy(&parser, &p0);
+	p1 = &parser;
 	if (dns_unwrap(p1) == -1) {
         LOG_DEBUG("FROM: %s this is not good", p1->question[0].domain);
 		return -1;
 	}
 	p0.question[0] = p1->question[1];
+	qc->parser.len = dns_build(&parser, qc->parser.buf, sizeof(qc->parser.buf));
+	assert(qc->parser.len > 0);
 
 	uint8_t optbuf[256];
 	add_client_subnet(&p0, optbuf, &subnet4_data);
@@ -561,6 +571,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	int i;
 	int offset = (p0.head.ident & 0xfff);
 	struct dns_query_context *qc = &_orig_list[offset];
+	struct dns_parser parser, def_parser, ecs_parser;
 
 	if (p0.question[0].type == NSTYPE_PTR) {
 		p0.head.flags &= ~NSFLAG_RCODE;
@@ -568,10 +579,11 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	}
 
 	assert (p0.question[0].domain);
-	if (strcmp(qc->parser.question[1].domain, p0.question[0].domain)) {
+	dns_parse(&parser, qc->parser.buf, qc->parser.len);
+	if (strcmp(parser.question[1].domain, p0.question[0].domain)) {
 		struct dns_parser p1 = {};
 		const char *domain = p0.question[0].domain;
-		LOG_DEBUG("query soa: %s %s ", qc->parser.question[1].domain, p0.question[0].domain);
+		LOG_DEBUG("query soa: %s %s ", parser.question[1].domain, p0.question[0].domain);
 
 		for (i = 0; i < p0.head.answer; i++) {
 			res = &p0.answer[i];
@@ -605,7 +617,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 			p1.question[0].type   = NSTYPE_A;
 			p1.question[0].klass  = NSCLASS_INET;
 
-			if (soa_nameserver && strcasecmp(soa_nameserver, qc->parser.question[1].domain)) {
+			if (soa_nameserver && strcasecmp(soa_nameserver, parser.question[1].domain)) {
 				p1.head.ident += 0x1000;
 				p1.question[0].domain = add_domain(&p1, soa_nameserver);
 				dns_sendto(ctx->outfd, &p1, ctx->dnsaddr, ctx->dnslen);
@@ -639,9 +651,11 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	}
 
 	if (contains_subnet(&p0)) {
-		dns_parser_copy(&qc->ecs_parser, &p0);
+		dns_parser_copy(&ecs_parser, &p0);
+		dns_parse(&def_parser, qc->def_parser.buf, qc->def_parser.len);
 	} else {
-		dns_parser_copy(&qc->def_parser, &p0);
+		dns_parse(&ecs_parser, qc->ecs_parser.buf, qc->ecs_parser.len);
+		dns_parser_copy(&def_parser, &p0);
 	}
 
 	for (i = 0; i < p0.head.answer; i++) {
@@ -654,28 +668,31 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 		if ((res->type == NSTYPE_A || res->type == NSTYPE_AAAA)
 				&& NULL == lookupRoute(res->value, res->type)) {
-			dns_parser_copy(&qc->ecs_parser, &p0);
+			dns_parser_copy(&ecs_parser, &p0);
 			qc->is_china_domain = 1;
 			break;
 		}
 	}
 
-check_flush:
-	if (qc->is_china_domain && qc->ecs_parser.head.question) {
-		dns_parser_copy(&p0, &qc->ecs_parser);
+	qc->ecs_parser.len = dns_build(&ecs_parser, qc->ecs_parser.buf, sizeof(qc->ecs_parser.buf));
+	qc->def_parser.len = dns_build(&def_parser, qc->def_parser.buf, sizeof(qc->def_parser.buf));
 
-		p0.question[0] = qc->parser.question[0];
+check_flush:
+	if (qc->is_china_domain && ecs_parser.head.question) {
+		dns_parser_copy(&p0, &ecs_parser);
+
+		p0.question[0] = parser.question[0];
 		memmove(p0.answer + 1, p0.answer, sizeof(p0.answer[0]) * p0.head.answer);
 
 		res = &p0.answer[0];
-		res->domain = add_domain(&p0, qc->parser.question[0].domain);
+		res->domain = add_domain(&p0, parser.question[0].domain);
 		res->type   = NSTYPE_CNAME;
 		res->klass  = NSCLASS_INET;
 		res->ttl    = 3600;
-		*(const char **)res->value  = add_domain(&p0, qc->parser.question[1].domain);
+		*(const char **)res->value  = add_domain(&p0, parser.question[1].domain);
 		p0.head.answer++;
 
-		const char *ptr = get_suffix(qc->parser.question[0].domain, 3);
+		const char *ptr = get_suffix(parser.question[0].domain, 3);
 		
 		for (i = 0; i < p0.head.author && ptr; i++) {
 			res = &p0.author[i];
@@ -686,22 +703,22 @@ check_flush:
 		}
 
 		p0.head.addon = 0;
-		p0.head.ident = qc->parser.head.ident;
+		p0.head.ident = parser.head.ident;
 		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 	}
 
-	if (qc->is_nonchina_domain && qc->def_parser.head.question && qc->ecs_parser.head.question) {
+	if (qc->is_nonchina_domain && def_parser.head.question && ecs_parser.head.question) {
 		struct dns_question *que;
-		dns_parser_copy(&p0, &qc->def_parser);
+		dns_parser_copy(&p0, &def_parser);
 
 		que = &p0.question[0];
-		p0.question[0] = qc->parser.question[0];
+		p0.question[0] = parser.question[0];
 
-		if (dns_answer_diff(&qc->def_parser, &qc->ecs_parser) == 0) {
+		if (dns_answer_diff(&def_parser, &ecs_parser) == 0) {
 			for (i = 0; i < p0.head.answer; i++) {
 				res = &p0.answer[i];
-				if (strcasecmp(res->domain, qc->parser.question[1].domain) == 0) {
-					res->domain = add_domain(&p0, qc->parser.question[0].domain);
+				if (strcasecmp(res->domain, parser.question[1].domain) == 0) {
+					res->domain = add_domain(&p0, parser.question[0].domain);
 				}
 			}
 			LOG_DEBUG("ecs is ko, will return cname");
@@ -718,7 +735,7 @@ check_flush:
 			LOG_DEBUG("ecs is ok, do not return cname");
 		}
 
-		const char *ptr = get_suffix(qc->parser.question[0].domain, 3);
+		const char *ptr = get_suffix(parser.question[0].domain, 3);
 		
 		for (i = 0; i < p0.head.author && ptr; i++) {
 			res = &p0.author[i];
@@ -728,14 +745,17 @@ check_flush:
 			}
 		}
 
-		p0.head.ident = qc->parser.head.ident;
+		p0.head.ident = parser.head.ident;
 		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 	}
 
 	LOG_DEBUG("%s is_nonchina_domain %d is_china_domain %d question ecs=%d def=%d",
-			qc->parser.question[1].domain,
+			parser.question[1].domain,
 			qc->is_nonchina_domain, qc->is_china_domain, 
-			qc->ecs_parser.head.question, qc->def_parser.head.question);
+			ecs_parser.head.question, def_parser.head.question);
+	// dns_build(&ecs_parser, qc->ecs_parser.buf, qc->ecs_parser.len);
+	// dns_build(&def_parser, qc->def_parser.buf, qc->def_parser.len);
+	// dns_build(&parser, qc->parser.buf, qc->parser.len);
 	return 0;
 }
 
@@ -751,6 +771,7 @@ int main(int argc, char *argv[])
 	struct sockaddr_in6 myaddr6;
 	struct sockaddr * paddr6 = (struct sockaddr *)&myaddr6;
 	setenv("BINDLOCAL", "::ffff:127.0.0.111", 0);
+	LOG_DEBUG("memory: %d %d %d\n", sizeof(_orig_list), sizeof(_orig_list[0]), sizeof(_orig_list[0].parser));
 
 	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	assert(outfd != -1);

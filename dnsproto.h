@@ -68,7 +68,6 @@ struct dns_question {
 	uint16_t type;
 	uint16_t klass;
 
-	int flags;
 	const char *domain;
 };
 
@@ -78,7 +77,7 @@ struct dns_resource {
 	uint32_t ttl;
 	uint16_t len;
 
-	int flags;
+	short flags;
 	const char *domain;
 	uint8_t value[64];
 };

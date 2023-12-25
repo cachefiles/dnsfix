@@ -31,6 +31,7 @@
 
 static char addrbuf[256];
 #define ntop6(addr) inet_ntop(AF_INET6, &addr, addrbuf, sizeof(addrbuf))
+#define ntop6p(addr) inet_ntop(AF_INET6, addr, addrbuf, sizeof(addrbuf))
 
 struct dns_resource _predefine_resource_record[] = {
 	{
@@ -134,7 +135,7 @@ struct dns_context {
 	int sockfd;
 
 	socklen_t dnslen;
-	struct sockaddr *dnsaddr;
+	struct sockaddr_in6 *dnsaddr;
 };
 
 struct dns_query_context {
@@ -142,7 +143,7 @@ struct dns_query_context {
 	struct dns_parser parser;
 };
 
-static struct dns_query_context _orig_list[0xfff];
+static struct dns_query_context _orig_list[0xfff + 1];
 
 static int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
 {
@@ -215,12 +216,66 @@ static int dns_rewrap(struct dns_parser *p1)
 	}
 
 	assert(ndot >= 2);
-	if (strcasecmp(dots[(ndot - 2) & 0x7], "cootail.com")) {
+	if (!strcasecmp(dots[(ndot - 2) & 0x7], "cootail.com")) {
 		return 0;
 	}
 
-	dots[(ndot - 2) & 0x7][-1] = 0;
-	LOG_DEBUG("dns_unwrap warning %s XX", title);
+	strcat(optp, ".cootail.com");
+
+	limit = optp - 1;
+	ndot--;
+	optp = dots[ndot & 0x7];
+
+	if (ndot < 1) {
+		LOG_DEBUG("dns_unwrap warning %s XX", title);
+		que1->domain = add_domain(p1, title);
+		return 0;
+	}
+
+	int cc = 0;
+	if (optp + 1 == limit) {
+		limit = dots[ndot & 0x7] -2;
+		ndot--;
+		optp = dots[ndot & 0x7];
+		cc = 1;
+	}
+
+	if (cc == 0 || dns_contains(optp)) {
+		for (; *optp && optp < limit; optp++) {
+			char t = *optp;
+			*optp = *limit;
+			*limit-- = t;
+		}
+
+		if (ndot < 1) {
+			LOG_DEBUG("dns_unwrap ork %s", title);
+			que1->domain = add_domain(p1, title);
+			return 0;
+		}
+
+		limit = dots[ndot & 0x7] -2;
+		ndot--;
+		optp = dots[ndot & 0x7];
+	}
+
+#if 0
+	if (ndot < 1) {
+		LOG_DEBUG("dns_unwrap warning %s", title);
+		que1->domain = add_domain(p1, title);
+		return 0;
+	}
+#endif
+
+	char t = *optp;
+	memmove(optp, optp + 1, limit - optp);
+	*limit = t;
+
+	LOG_DEBUG("dns_unwrap title=%s cc=%d", title, cc);
+	if (que1->type == NSTYPE_PTR) {
+		que1->domain = add_domain(p1, que->domain);
+		return 0;
+	}
+
 	que1->domain = add_domain(p1, title);
 	return 0;
 }
@@ -285,7 +340,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 		return -1;
 	}
 
-	if (getenv("REFUSED_IPV4")) {
+	if (getenv("FORWARD")) {
 		p1->question[1] = p1->question[0];
 		p0.question[0] = p1->question[1];
 	} else if (dns_rewrap(p1) == -1) {
@@ -300,7 +355,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	p0.head.flags |= NSFLAG_RD;
 	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
 	if (retval == -1) {
-		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
+		LOG_DEBUG("dns_sendto failure: %s target %p", strerror(errno), ctx->dnsaddr);
 		return 0;
 	}
 

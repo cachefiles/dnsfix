@@ -27,8 +27,8 @@ ifeq ($(BUILD_TARGET), Linux)
 LOCAL_LDLIBS += -lrt -lresolv
 endif
 
-LOCAL_CFLAGS += -g -Wall -Wno-sign-compare -I.
-LOCAL_CXXFLAGS += -g -Wall -Wno-sign-compare -I.
+LOCAL_CFLAGS += -g -Wall -Wno-sign-compare -I. 
+LOCAL_CXXFLAGS += -g -Wall -Wno-sign-compare -I. 
 
 VPATH := $(THIS_PATH)/libtx:$(THIS_PATH)
 

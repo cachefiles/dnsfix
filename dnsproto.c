@@ -156,7 +156,7 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 				case 'B':
 					valptr += sizeof(dopt);
 					assert(valptr < vallimit);
-					assert(buf + res->len > dopt);
+					assert(buf + res->len >= dopt);
 					res->len >= 360 && printf("res->len=%d: type=%d\n", res->len, res->type);
 					assert(res->len < 360);
 					void * dotp0 = add_value(parse, dopt, buf + res->len - dopt);

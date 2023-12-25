@@ -1274,7 +1274,7 @@ int dns_backward(dns_udp_context_t *up, char *buf, size_t count, struct sockaddr
 		}
 	}
 
-
+	LOG_DEBUG("FROM: %s name: %s", ntop6(in_addr1->sin6_addr), p0.question[0].domain);
 	for (i = 0; i < p->head.answer; i++) {
 		res = &p->answer[i];
 		if (res->type == NSTYPE_NS) {

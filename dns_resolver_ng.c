@@ -53,42 +53,18 @@ struct dns_resource _predefine_resource_record[] = {
 	{
 		.type = NSTYPE_A,
 		.klass = NSCLASS_INET,
-		.ttl = 360,
-		.len = 4,
-		.flags = 0,
-		.domain = "cdn.855899.xyz",
-		.value = {54, 192, 17, 115}},
-	{
-		.type = NSTYPE_A,
-		.klass = NSCLASS_INET,
-		.ttl = 360,
-		.len = 4,
-		.flags = 0,
-		.domain = "cdn.855899.xyz",
-		.value = {172, 67, 165, 145}},
-	{
-		.type = NSTYPE_A,
-		.klass = NSCLASS_INET,
-		.ttl = 36000,
-		.len = 4,
-		.flags = 0,
-		.domain = "mtalk.oogleg.moc.cootail.com",
-		.value = {10, 0, 3, 1}},
-	{
-		.type = NSTYPE_A,
-		.klass = NSCLASS_INET,
 		.ttl = 36000,
 		.len = 4,
 		.flags = 0,
 		.domain = "mtalk.google.com",
-		.value = {10, 0, 3, 1}},
+		.value = {110, 42, 145, 164}},
 	{
-		.type = NSTYPE_A,
+		.type = NSTYPE_AAAA,
 		.klass = NSCLASS_INET,
 		.ttl = 36000,
 		.len = 4,
 		.flags = 0,
-		.domain = "alt1-mtalk.google.com",
+		.domain = "ipv4only.arpa",
 		.value = {110, 42, 145, 164}},
 };
 
@@ -149,6 +125,29 @@ struct dns_context {
 #define FLAG_LOCAL  0x2
 #define FLAG_ALL    0x3
 #define FLAG_BLOCK_IPV4 0x4
+#define FLAG_ZERO_IDENT 0x8
+
+struct dns_incoming {
+	uint16_t index;
+	uint8_t flags;
+	uint8_t length;
+	uint8_t  body[96];
+};
+
+#if 0
+struct dns_outgoing {
+};
+#endif
+
+struct dns_switcher {
+   char *domain;
+   uint8_t near_out_A, near_got_A;
+   uint8_t pure_out_A, pure_got_A;
+   uint8_t near_out_AAAA, near_got_AAAA;
+   uint8_t pure_out_AAAA, pure_got_AAAA;
+
+   struct dns_incoming incomings[4];
+};
 
 struct dns_query_context {
 	int flags;
@@ -564,6 +563,7 @@ int update_preference(struct dns_score_board *sb, struct dns_query_context *qc, 
 		sb->updated = 1;
 	}
 
+    assert(qc->preference >= sb->preference);
 	return 0;
 }
 
@@ -592,13 +592,20 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 	LOG_DEBUG("record: %s %d %s %x", ntop6(from->sin6_addr), p0.head.answer, p0.question[0].domain, p0.question[0].type);
 
+	const char *suffixes = strstr(p0.question[0].domain, ".oil.cootail.com");
+
+    size_t domainlen = strlen(pp->question[0].domain);
+	if (strncmp(p0.question[0].domain, pp->question[0].domain, domainlen)) {
+		LOG_DEBUG("reponse out of day: %s %s type=%d %s", ntop6(qc->from), pp->question[0].domain, p0.question[0].type, p0.question[0].domain);
+		return 0;
+	}
+
 	if (p0.question[0].type != NSTYPE_AAAA && p0.question[0].type != NSTYPE_A) {
 		LOG_DEBUG("skip domain: %s %s type=%d", ntop6(qc->from), pp->question[0].domain, p0.question[0].type);
 		dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
 		return 0;
 	}
 
-	const char *suffixes = strstr(p0.question[0].domain, ".oil.cootail.com");
 	if (suffixes == NULL && strcmp(pp->question[0].domain, p0.question[0].domain)) {
 		LOG_DEBUG("skip domain: %s %s %s type=%d", ntop6(qc->from), pp->question[0].domain, p0.question[0].domain, p0.question[0].type);
 		return 0;
@@ -608,11 +615,17 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	if (qc->score_board_id != -1) {
 		sb = &_hash_src[qc->score_board_id];
 
+		struct dns_query_context *qc4, *qc6;
+		qc4 = &_orig_list[sb->ipv4_offset & 0xfff];
+		qc6 = &_orig_list[sb->ipv6_offset & 0xfff];
+
 		sb->updated = 0;
 		if (sb->ipv4_offset != p0.head.ident
 				&& sb->ipv6_offset != p0.head.ident) {
 			sb = NULL;
-		} else if (!sb->checking) {
+		} else if (!sb->checking || qc4->score_board_id != qc6->score_board_id) {
+			LOG_DEBUG("checking %d qc4_score_board_id %x qc6_score_board_id %x",
+					sb->checking, qc4->score_board_id, qc6->score_board_id);
 			sb = NULL;
 		} else {
 			int type = p0.question[0].type;
@@ -620,6 +633,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 			int ipv6 = sb->ipv6_offset == p0.head.ident && type == NSTYPE_AAAA;
 			assert(ipv4 || ipv6 || suffixes);
 		}
+
 	}
 
 	qc->updated = 0;
@@ -758,6 +772,11 @@ check_finish:
 		qc4 = &_orig_list[sb->ipv4_offset & 0xfff];
 		qc6 = &_orig_list[sb->ipv6_offset & 0xfff];
 
+		pp6 = &qc6->parser;
+		pp4 = &qc4->parser;
+        assert(qc4->score_board_id == qc6->score_board_id);
+		assert(suffixes || !strcasecmp(pp4->question[0].domain, pp6->question[0].domain));
+
 		assert(sb->updated <= qc->updated);
 		if (qc->updated) {
 			assert(!sb || sb->preference <= qc->preference);  
@@ -835,6 +854,8 @@ check_finish:
 	if ((nat64_pref <= qc->nat64_pref) && (qc->updated || pp == NULL)) {
 		dns_parser_copy(&qc->parser, &p0);
 		qc->nat64_pref = nat64_pref;
+	} else if (qc->updated) {
+		dns_parser_copy(&qc->parser, &p0);
 	} else {
 		assert(nat64_pref >= qc->nat64_pref);
 		assert(!qc->updated || pp == NULL);
@@ -923,6 +944,16 @@ int main(int argc, char *argv[])
 
 	const struct sockaddr_in6 *inp = (const struct sockaddr_in6 *)&dnslocal;
 	LOG_DEBUG("dns_build bytes %d %d %d %s", 0, inp->sin6_family, htons(inp->sin6_port), ntop6(inp->sin6_addr));
+
+	const char *ipv4only = "ipv4only.arpa";
+	for (int i = 0; i < ARRAY_SIZE(_predefine_resource_record); i++) {
+
+		struct dns_resource * res = &_predefine_resource_record[i];
+		if ((res->type == NSTYPE_AAAA) && strcasecmp(res->domain, ipv4only) == 0) {
+			inet_pton(AF_INET6, getenv("NAT64_PREFIX"), res->value);
+			break;
+		}
+	}
 
 	do {
 		FD_ZERO(&readfds);

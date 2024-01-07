@@ -40,6 +40,90 @@ struct dns_context {
 	int sockfd;
 };
 
+
+struct subnet_info {
+    uint16_t tag; // 0x0008
+    uint16_t len;
+    uint16_t family;
+    uint8_t source_netmask;
+    uint8_t scope_netmask;
+    uint8_t addr[16];
+};
+
+#define NS_IPV6 2
+#define NS_IPV4 1
+
+
+static int load_client_subnet(struct dns_parser *p0, struct sockaddr_in6 *from)
+{
+#ifndef DISABLE_SUBNET
+
+	struct dns_resource *res = NULL;
+	struct subnet_info *info = NULL;
+
+	for (int i = 0; i < p0->head.addon; i++) {
+		res = &p0->addon[i];
+		if (res->type != NSTYPE_OPT) {
+			continue;
+		}
+
+		if (res->domain == NULL || *res->domain == 0) {
+			size_t len = res->len;
+			const uint8_t * valp = *(const uint8_t **)res->value;
+			struct tagheader {uint16_t tag; uint16_t len; } tag0;
+
+			while (len > sizeof(tag0)) {
+				memcpy(&tag0, valp, sizeof(tag0));
+				if (len < sizeof(tag0) + htons(tag0.len)) break;
+				const uint8_t *hold = valp;
+				valp += sizeof(tag0) + htons(tag0.len);
+				len -= (sizeof(tag0) + htons(tag0.len));
+				if (tag0.tag == htons(0x0008)) {
+					info = hold;
+					break;
+				}
+			}
+		}
+	}
+
+	char cmd[1024];
+	if (info != NULL) {
+		char buf[256], bytes[16] = {};
+		int prefixlen = info->source_netmask;//+ info->scope_netmask;
+		size_t subnet_len = 8 + ((7 + prefixlen) >> 3);
+		int family = htons(info->family);
+		if (family == NS_IPV4) {
+			family = AF_INET;
+			if (prefixlen == 32) prefixlen = 24;
+		} 
+		else if (family == NS_IPV6) { 
+			family = AF_INET6;
+			if (prefixlen > 64) prefixlen = 48;
+		}
+		memcpy(bytes, info->addr, prefixlen >> 3);
+		LOG_DEBUG("subnet family: %d sunet %s/%d", family, inet_ntop(family, bytes, buf, sizeof(buf)), prefixlen);
+		if (family == AF_INET6) {
+			sprintf(cmd, "ipset add bypass6 %s/%d", buf, prefixlen);
+			system(cmd);
+		} else {
+			sprintf(cmd, "ipset add bypass %s/%d", buf, prefixlen);
+			system(cmd);
+		}
+	} else {
+		char buf[256], bytes[16] = {};
+        if (IN6_IS_ADDR_V4MAPPED(&from->sin6_addr)) {
+			memcpy(bytes, &from->sin6_addr, sizeof(from->sin6_addr));
+			bytes[15] = 0;
+			inet_ntop(AF_INET, bytes + 12, buf, sizeof(buf));
+			sprintf(cmd, "ipset add bypass %s/%d", buf, 24);
+			system(cmd);
+		}
+	}
+#endif
+
+	return 0;
+}
+
 static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockaddr_in6 *inp, size_t tolen)
 {
 	ssize_t len;
@@ -56,6 +140,22 @@ static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockadd
 			inp->sin6_family, htons(inp->sin6_port), ntop6(inp->sin6_addr), parser->question[0].domain);
 
 	return len;
+}
+
+static int translate_domain(struct dns_parser *pp, char **store, const char *domain)
+{
+    char buf[1024];
+	char *accessp = strcasestr(domain, ".access.");
+	if (accessp == NULL) {
+		return -1;
+	}
+
+	int first_len = accessp - domain;
+	memcpy(buf, domain, first_len);
+    strcpy(buf + first_len, domain + first_len + 7);
+    *store = add_domain(pp, buf);
+
+    return 0;
 }
 
 int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
@@ -80,6 +180,23 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
 		return 0;
 	}
+
+	load_client_subnet(&p0, from);
+
+	p0.head.flags |= NSFLAG_QR;
+	if (~p0.head.flags & NSFLAG_RD)
+		p0.head.flags |= NSFLAG_AA;
+
+    p0.answer[0].domain = p0.question[0].domain;
+    p0.answer[0].type   = NSTYPE_CNAME;
+    p0.answer[0].ttl    = 600;
+    p0.answer[0].klass  = NSCLASS_INET;
+	if (translate_domain(&p0, (char **)p0.answer[0].value, p0.answer[0].domain) == 0) {
+		p0.head.addon = 0;
+		p0.head.answer++;
+	}
+
+	dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
 
 	return 0;
 }

@@ -531,6 +531,8 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	p0.question[0] = pp->question[0];
 
 	p0.head.flags |= NSFLAG_QR;
+	p0.head.flags |= NSFLAG_RA;
+	p0.head.flags |= NSFLAG_RD;
 	p0.head.flags &= ~NSFLAG_RCODE;
 	p0.answer[0].klass = NSCLASS_INET;
 

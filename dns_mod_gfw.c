@@ -275,123 +275,238 @@ static int dns_sendto(int outfd, struct dns_parser *parser, const struct sockadd
 	return len;
 }
 
+int off_primary = 0;
+static char cache_primary[1024 * 1024] = {};
+
+int off_secondary = 0;
+static char cache_secondary[1024 * 1024] = {};
+
+enum {STATUS_ALLOW, STATUS_REJECT};
+static char * cache_current = cache_primary;
+
+static int cache_get(const char *host)
+{
+    int off = 0;
+
+    for (off = 0; off < off_primary; off++) {
+        int length = cache_primary[off] & 0xff;
+
+        if (strncasecmp(cache_primary + off + 1, host, length) == 0) {
+            int type = cache_primary[off + length];
+            LOG_DEBUG("get cache host: %s type %d", host, type);
+            return type | 0x80;
+        }
+
+        off += length;
+    }
+
+    for (off = 0; off < off_secondary; off++) {
+        int length = cache_secondary[off] & 0xff;
+
+        if (strncasecmp(cache_secondary + off + 1, host, length) == 0) {
+            int type = cache_secondary[off + length];
+            LOG_DEBUG("get cache host: %s type %d", host, type);
+            return type | 0x80;
+        }
+
+        off += length;
+    }
+
+    return 0;
+}
+
+
+static int cache_add(const char *host, int atype)
+{
+    int off = 0;
+
+    if (cache_get(host))
+        return 0;
+
+    int hostlen = strlen(host);
+
+    if (atype == STATUS_ALLOW)
+        hostlen++;
+
+    assert(hostlen < 256);
+    int *off_current = 0;
+    if (cache_current == cache_primary) {
+        off_current = &off_primary;
+        if (off_primary + hostlen >= sizeof(cache_primary)) {
+            cache_current = cache_secondary;
+            off_current = &off_secondary;
+            off_secondary = 0;
+        }
+    } else if (cache_current == cache_secondary) {
+        off_current = &off_secondary;
+        if (off_secondary + hostlen >= sizeof(cache_secondary)) {
+            cache_current = cache_primary;
+            off_current = &off_primary;
+            off_primary = 0;
+        }
+    }
+
+    assert(off_current);
+
+    off = *off_current;
+
+    cache_current[off++] = hostlen;
+    memcpy(cache_current + off, host, hostlen);
+    off += hostlen;
+
+    *off_current = off;
+
+    LOG_DEBUG("cache_add %s %d", host, atype);
+    return 0;
+}
+
 int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
 {
-	struct dns_parser p0;
-	struct dns_parser *pp;
+    struct dns_parser p0;
+    struct dns_parser *pp;
 
-	pp = dns_parse(&p0, buf, count);
-	if (pp == NULL) {
-		LOG_DEBUG("do_dns_forward parse failure");
-		return 0;
-	}
+    pp = dns_parse(&p0, buf, count);
+    if (pp == NULL) {
+        LOG_DEBUG("do_dns_forward parse failure");
+        return 0;
+    }
 
-	if (p0.head.flags & 0x8000) {
-		LOG_DEBUG("FROM: %s this is not query", "nothing");
-		return -1;
-	}
+    if (p0.head.flags & 0x8000) {
+        LOG_DEBUG("FROM: %s this is not query", "nothing");
+        return -1;
+    }
 
-	if (p0.head.question && fetch_predefine_resource_record(&p0)) {
-		LOG_DEBUG("prefetch: %s", p0.question[0].domain);
-		p0.head.flags |= NSFLAG_QR;
-		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
-		return 0;
-	}
+    if (p0.head.question && fetch_predefine_resource_record(&p0)) {
+        LOG_DEBUG("prefetch: %s", p0.question[0].domain);
+        p0.head.flags |= NSFLAG_QR;
+        dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+        return 0;
+    }
 
-	if (p0.head.question == 0) {
-		p0.head.flags |= RCODE_REFUSED;
-		p0.head.flags |= NSFLAG_QR;
-		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
-		return 0;
-	}
+    int type = cache_get(p0.question[0].domain);
+    if (type && (p0.question[0].type == NSTYPE_A || p0.question[0].type == NSTYPE_AAAA)) {
+        LOG_DEBUG("cache_get: %s %d", p0.question[0].domain, type);
+        p0.head.flags |= NSFLAG_QR;
+        if (p0.head.flags & NSFLAG_RD) p0.head.flags |= NSFLAG_RA;
+        p0.head.flags |= NSFLAG_AA;
+        p0.head.flags &= ~NSFLAG_ZERO;
 
-	const char *myzone = strcasestr(p0.question[0].domain, "oil.cootail.com");
-	if (myzone == NULL || strcasecmp(myzone, "oil.cootail.com") || p0.question[0].type == NSTYPE_CNAME) {
-		p0.head.flags |= RCODE_NXDOMAIN;
-		p0.head.flags |= NSFLAG_QR;
-		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
-		return 0;
-	}
-	
-	int retval = 0;
-	int offset = (p0.head.ident & 0xfff);
+        p0.head.answer = 1;
+        p0.head.addon = 0;
+        p0.answer[0].domain = p0.question[0].domain;
+        p0.answer[0].type = p0.question[0].type;
+        p0.answer[0].ttl  = 7200;
+        p0.answer[0].klass = p0.question[0].klass;
 
-	struct dns_parser *p1 = NULL;
-	struct dns_query_context qc0 = {};
-	struct dns_query_context *qc = &qc0;
-	struct dns_query_context *qc1 = &_orig_list[offset];
+        if (type & 0x7f) {
+            uint32_t fakeip = rand();
+            if (fakeip == 0x7f7f7f7f) fakeip = 0x1010101;
+            uint32_t list[4] = {fakeip, fakeip, fakeip, fakeip};
+            memcpy(p0.answer[0].value, list, 16);
+        } else if (p0.question[0].type == NSTYPE_AAAA) {
+            memset(p0.answer[0].value, 0xfe, 16);
+        } else {
+            memset(p0.answer[0].value, 127, 16);
+        }
 
-	memset(qc, 0, sizeof(qc0));
-	qc->from = *from;
+        dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+        return 0;
+    }
 
-	dns_parser_copy(&qc->parser, &p0);
-	p1 = &qc->parser;
+    if (p0.head.question == 0) {
+        p0.head.flags |= RCODE_REFUSED;
+        p0.head.flags |= NSFLAG_QR;
+        dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+        return 0;
+    }
 
-	if (dns_rewrap(p1) == -1) {
-		p0.head.flags |= RCODE_REFUSED;
-		p0.head.flags |= NSFLAG_QR;
-		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
-		LOG_DEBUG("FROM: %s this is not good %d", p0.question[0].domain, p0.question[0].type);
-		return -1;
-	}
+    const char *myzone = strcasestr(p0.question[0].domain, "oil.cootail.com");
+    if (myzone == NULL || strcasecmp(myzone, "oil.cootail.com") || p0.question[0].type == NSTYPE_CNAME) {
+        p0.head.flags |= RCODE_NXDOMAIN;
+        p0.head.flags |= NSFLAG_QR;
+        dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+        return 0;
+    }
 
-	const char *zone = p1->addon[0].domain;
-	LOG_DEBUG("%04x: FROM: %s to %s, zone %s", p1->head.ident, p1->question[0].domain, p1->question[1].domain, zone);
-	if (zone != NULL && *p0.question[0].domain == '_') {
-		struct dns_resource *res;
-		p0.head.flags |= (RCODE_NXDOMAIN| NSFLAG_AA);
-		p0.head.flags |= (NSFLAG_RA| NSFLAG_QR);
+    int retval = 0;
+    int offset = (p0.head.ident & 0xfff);
 
-		res = &p0.author[0];
-		res->domain = add_domain(&p0, zone);
-		res->type = NSTYPE_SOA;
-		res->klass = NSCLASS_INET;
-		res->ttl = 7200;
-		memcpy(res->value , &_rr_soa, sizeof(_rr_soa));
-		p0.head.author = 1;
+    struct dns_parser *p1 = NULL;
+    struct dns_query_context qc0 = {};
+    struct dns_query_context *qc = &qc0;
+    struct dns_query_context *qc1 = &_orig_list[offset];
 
-		retval = dns_sendto(ctx->sockfd, &p0, &qc->from, ctx->dnslen);
-		if (retval == -1) {
-			LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
-			return 0;
-		}
-		return 0;
-	}
+    memset(qc, 0, sizeof(qc0));
+    qc->from = *from;
 
-	if (zone != NULL && strcasecmp(zone, "oil.cootail.com") == 0) {
-		p0.question[0] = p1->question[1];
-		p0.head.flags &= ~NSFLAG_QR;
-		p0.head.flags &= ~NSFLAG_RD;
-		p0.head.flags &= ~NSFLAG_RCODE;
-		p0.head.question = 1;
-		p0.head.answer = 0;
-		p0.head.author = 0;
+    dns_parser_copy(&qc->parser, &p0);
+    p1 = &qc->parser;
 
-		p0.addon[0].domain = "";
-		p0.addon[0].ttl = 0;
-		p0.addon[0].klass = 1320;
-		p0.addon[0].type = NSTYPE_OPT;
-		p0.addon[0].len = 0;
-		p0.head.addon = 1;
+    if (dns_rewrap(p1) == -1) {
+        p0.head.flags |= RCODE_REFUSED;
+        p0.head.flags |= NSFLAG_QR;
+        dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+        LOG_DEBUG("FROM: %s this is not good %d", p0.question[0].domain, p0.question[0].type);
+        return -1;
+    }
 
-		retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
-		if (retval == -1) {
-			LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
-			return 0;
-		}
+    const char *zone = p1->addon[0].domain;
+    LOG_DEBUG("%04x: FROM: %s to %s, zone %s", p1->head.ident, p1->question[0].domain, p1->question[1].domain, zone);
+    if (zone != NULL && *p0.question[0].domain == '_') {
+        struct dns_resource *res;
+        p0.head.flags |= (RCODE_NXDOMAIN| NSFLAG_AA);
+        p0.head.flags |= (NSFLAG_RA| NSFLAG_QR);
 
-		retval = dns_sendto(ctx->outfd, &p0, &_ain6, sizeof(_ain6));
-		if (retval == -1) {
-			LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
-			return 0;
-		}
+        res = &p0.author[0];
+        res->domain = add_domain(&p0, zone);
+        res->type = NSTYPE_SOA;
+        res->klass = NSCLASS_INET;
+        res->ttl = 7200;
+        memcpy(res->value , &_rr_soa, sizeof(_rr_soa));
+        p0.head.author = 1;
 
-		*qc1 = qc0;
-		qc1->digest = 0;
-		dns_parser_copy(&qc1->parser, &qc0.parser);
-	}
+        retval = dns_sendto(ctx->sockfd, &p0, &qc->from, ctx->dnslen);
+        if (retval == -1) {
+            LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
+            return 0;
+        }
+        return 0;
+    }
 
-	return 0;
+    if (zone != NULL && strcasecmp(zone, "oil.cootail.com") == 0) {
+        p0.question[0] = p1->question[1];
+        p0.head.flags &= ~NSFLAG_QR;
+        p0.head.flags &= ~NSFLAG_RD;
+        p0.head.flags &= ~NSFLAG_RCODE;
+        p0.head.question = 1;
+        p0.head.answer = 0;
+        p0.head.author = 0;
+
+        p0.addon[0].domain = "";
+        p0.addon[0].ttl = 0;
+        p0.addon[0].klass = 1320;
+        p0.addon[0].type = NSTYPE_OPT;
+        p0.addon[0].len = 0;
+        p0.head.addon = 1;
+
+        retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
+        if (retval == -1) {
+            LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
+            return 0;
+        }
+
+        retval = dns_sendto(ctx->outfd, &p0, &_ain6, sizeof(_ain6));
+        if (retval == -1) {
+            LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
+            return 0;
+        }
+
+        *qc1 = qc0;
+        qc1->digest = 0;
+        dns_parser_copy(&qc1->parser, &qc0.parser);
+    }
+
+    return 0;
 }
 
 static int dump_resource(const char *title, struct dns_resource *res)
@@ -442,138 +557,150 @@ static uint32_t get_check_sum(void *buf, size_t count)
 
 int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
 {
-	int i;
-	struct dns_parser p0;
-	struct dns_parser *pp;
-	struct dns_resource *res;
+    int i;
+    struct dns_parser p0;
+    struct dns_parser *pp;
+    struct dns_resource *res;
 
-	pp = dns_parse(&p0, buf, count);
-	if (pp == NULL) {
-		LOG_DEBUG("do_dns_backward parse failure");
-		return 0;
-	}
+    pp = dns_parse(&p0, buf, count);
+    if (pp == NULL) {
+        LOG_DEBUG("do_dns_backward parse failure");
+        return 0;
+    }
 
 #if 0
-	if (~p0.head.flags & 0x8000) {
-		LOG_DEBUG("FROM: %s this is not response", inet_ntoa(from->sin_addr));
-		return -1;
-	}
+    if (~p0.head.flags & 0x8000) {
+        LOG_DEBUG("FROM: %s this is not response", inet_ntoa(from->sin_addr));
+        return -1;
+    }
 #endif
-	
-	int offset = (p0.head.ident & 0xfff);
-	struct dns_query_context *qc = &_orig_list[offset];
 
-	pp = &qc->parser;
-	if (pp->head.ident != p0.head.ident || pp->head.question != 2) {
-		LOG_DEBUG("FROM: %s XX unexpected response: %d", ntop6(from->sin6_addr), pp->head.question);
-		return -1;
-	}
+    int offset = (p0.head.ident & 0xfff);
+    struct dns_query_context *qc = &_orig_list[offset];
 
-	if (IN6_ARE_ADDR_EQUAL(&_ain6.sin6_addr, &from->sin6_addr)) {
-		int found = 0;
-		uint64_t val = 0;
+    pp = &qc->parser;
+    if (pp->head.ident != p0.head.ident || pp->head.question != 2) {
+        LOG_DEBUG("FROM: %s XX unexpected response: %d", ntop6(from->sin6_addr), pp->head.question);
+        return -1;
+    }
 
-		for (i = 0; 3 != found && i < p0.head.addon; i++) {
-			res = &p0.addon[i];
-			if (res->type == NSTYPE_AAAA) {
-				val = htonll(*(uint64_t *)res->value);
-				found = 2 + !lookupRoute6(val);
-			} else if (res->type == NSTYPE_A) {
-				val = htonll(*(uint64_t *)res->value) & 0xffffffff00000000ull;
-				found = 2 + !lookupRoute4(val);
-			}
-		}
+    if (IN6_ARE_ADDR_EQUAL(&_ain6.sin6_addr, &from->sin6_addr)) {
+        int found = 0;
+        uint64_t val = 0;
 
-		LOG_DEBUG("found=%d %s", found, ntop6(from->sin6_addr));
-		if (found != 3) {
-			p0.question[0] = pp->question[0];
-			p0.head.answer = 0;
-			p0.head.author = 0;
-			p0.head.addon = 0;
+        for (i = 0; 3 != found && i < p0.head.addon; i++) {
+            res = &p0.addon[i];
+            if (res->type == NSTYPE_AAAA) {
+                val = htonll(*(uint64_t *)res->value);
+                found = 2 + !lookupRoute6(val);
+            } else if (res->type == NSTYPE_A) {
+                val = htonll(*(uint64_t *)res->value) & 0xffffffff00000000ull;
+                found = 2 + !lookupRoute4(val);
+            }
+        }
 
-			p0.head.flags |= NSFLAG_QR;
-			p0.head.flags &= ~NSFLAG_RCODE;
-			p0.head.flags |= RCODE_REFUSED;
+        LOG_DEBUG("found=%d %s", found, ntop6(from->sin6_addr));
+        if (found != 3) {
+            p0.question[0] = pp->question[0];
+            p0.head.answer = 0;
+            p0.head.author = 0;
+            p0.head.addon = 0;
 
-			if (NULL != getenv("REFUSED")) 
-				dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+            p0.head.flags |= NSFLAG_QR;
+            p0.head.flags &= ~NSFLAG_RCODE;
+            p0.head.flags |= RCODE_REFUSED;
 
-			return -1;
-		}
-	}
+            if (NULL != getenv("REFUSED")) 
+                dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
 
-	uint32_t digest = get_check_sum(buf, 6 * 2);
-	if (digest != qc->digest && qc->digest != 0) {
-		LOG_DEBUG("FROM: %s digest %08x %08x %d", ntop6(from->sin6_addr), digest, qc->digest, count);
-		return -1;
-	}
+            return -1;
+        }
+    }
 
-	qc->digest = digest;
-	if (p0.head.author != 0 && p0.head.answer > 0) {
-		LOG_DEBUG("FROM: %s %d/%d/%d unexpected response", ntop6(from->sin6_addr), p0.head.author, p0.head.answer, p0.head.addon);
-		return -1;
-	}
+    uint32_t digest = get_check_sum(buf, 6 * 2);
+    if (digest != qc->digest && qc->digest != 0) {
+        LOG_DEBUG("FROM: %s digest %08x %08x %d", ntop6(from->sin6_addr), digest, qc->digest, count);
+        return -1;
+    }
 
-	if (pp->head.answer > p0.head.answer) {
-		LOG_DEBUG("FROM: %s should not overwrite response", ntop6(from->sin6_addr));
-		return -1;
-	}
+    qc->digest = digest;
+    if (p0.head.author != 0 && p0.head.answer > 0) {
+        LOG_DEBUG("FROM: %s %d/%d/%d unexpected response", ntop6(from->sin6_addr), p0.head.author, p0.head.answer, p0.head.addon);
+        return -1;
+    }
 
-	if (strcasecmp(pp->question[1].domain, p0.question[0].domain)) {
-		LOG_DEBUG("FROM: %s should not overwrite response since question not ok", ntop6(from->sin6_addr));
-		LOG_DEBUG("FROM: domain %s %s", pp->question[1].domain, p0.question[0].domain);
-		return -1;
-	}
+    if (pp->head.answer > p0.head.answer) {
+        LOG_DEBUG("FROM: %s should not overwrite response", ntop6(from->sin6_addr));
+        return -1;
+    }
 
-	LOG_DEBUG("%04x do_dns_backward parse copy: %d/%d/%d/%d",
-			p0.head.ident, p0.head.question, p0.head.answer, p0.head.author, p0.head.addon);
+    if (strcasecmp(pp->question[1].domain, p0.question[0].domain)) {
+        LOG_DEBUG("FROM: %s should not overwrite response since question not ok", ntop6(from->sin6_addr));
+        LOG_DEBUG("FROM: domain %s %s", pp->question[1].domain, p0.question[0].domain);
+        return -1;
+    }
 
-	p0.question[0] = pp->question[0];
+    LOG_DEBUG("%04x do_dns_backward parse copy: %d/%d/%d/%d",
+            p0.head.ident, p0.head.question, p0.head.answer, p0.head.author, p0.head.addon);
 
-	p0.head.flags |= NSFLAG_QR;
-	p0.head.flags |= NSFLAG_RA;
-	p0.head.flags |= NSFLAG_RD;
-	p0.head.flags &= ~NSFLAG_RCODE;
-	p0.answer[0].klass = NSCLASS_INET;
+    p0.question[0] = pp->question[0];
 
-	if (p0.head.answer > 0) {
-		p0.answer[0].domain = p0.question[0].domain;
-		for (i = 0; i < p0.head.answer; i++) {
-			p0.answer[i].ttl = 7200;
-			if (p0.head.addon) {
-				if (p0.answer[i].type == NSTYPE_A)
-					memset(p0.answer[i].value, 127, 4);
-				if (p0.answer[i].type == NSTYPE_AAAA)
-					memset(p0.answer[i].value, 0xfe, 16);
-				if (p0.answer[i].type == NSTYPE_CNAME)
-					*(char **)p0.answer[i].value = "chinazone.cootail.com";
-			}
-		}
-	} else if (p0.question[0].type == NSTYPE_AAAA
-			|| p0.question[0].type == NSTYPE_A) {
-		p0.answer[0].domain = p0.question[0].domain;
-		p0.answer[0].type = p0.question[0].type;
-		p0.answer[0].ttl = 7200;
-		if (p0.question[0].type == NSTYPE_A)
-			memset(p0.answer[0].value, 127, 4);
-		if (p0.question[0].type == NSTYPE_AAAA)
-			memset(p0.answer[0].value, 0xfe, 16);
-		p0.head.flags |= NSFLAG_AA;
-		p0.head.answer = 1;
-	}
+    p0.head.flags |= NSFLAG_QR;
+    p0.head.flags |= NSFLAG_RA;
+    p0.head.flags |= NSFLAG_RD;
+    p0.head.flags &= ~NSFLAG_RCODE;
+    p0.answer[0].klass = NSCLASS_INET;
 
-	for (i = 0; i < p0.head.author; i++) {
-		if (p0.author[i].type == NSTYPE_SOA) {
-			p0.author[i].domain = "oil.cootail.com";
-			p0.author[i].ttl = 7200;
-		}
-	}
+    if (p0.head.answer > 0) {
+        p0.answer[0].domain = p0.question[0].domain;
+        int allow_mask = 0;
+        for (i = 0; i < p0.head.answer; i++) {
+            p0.answer[i].ttl = 7200;
+            if (p0.head.addon) {
+                allow_mask = 1;
+                if (p0.answer[i].type == NSTYPE_A)
+                    memset(p0.answer[i].value, 127, 4);
+                if (p0.answer[i].type == NSTYPE_AAAA)
+                    memset(p0.answer[i].value, 0xfe, 16);
+                if (p0.answer[i].type == NSTYPE_CNAME)
+                    *(char **)p0.answer[i].value = "chinazone.cootail.com";
+            }
+        }
+
+        if (p0.head.flags & NSFLAG_RD) p0.head.flags |= NSFLAG_RA;
+        p0.head.flags |= NSFLAG_AA;
+        p0.head.flags &= ~NSFLAG_ZERO;
+
+        cache_add(p0.question[0].domain, allow_mask? STATUS_ALLOW: STATUS_REJECT);
+    } else if (p0.question[0].type == NSTYPE_AAAA
+            || p0.question[0].type == NSTYPE_A) {
+        p0.answer[0].domain = p0.question[0].domain;
+        p0.answer[0].type = p0.question[0].type;
+        p0.answer[0].ttl = 7200;
+        if (p0.question[0].type == NSTYPE_A)
+            memset(p0.answer[0].value, 127, 4);
+        if (p0.question[0].type == NSTYPE_AAAA)
+            memset(p0.answer[0].value, 0xfe, 16);
+        cache_add(p0.question[0].domain, STATUS_ALLOW);
+
+        if (p0.head.flags & NSFLAG_RD) p0.head.flags |= NSFLAG_RA;
+        p0.head.flags |= NSFLAG_AA;
+        p0.head.flags &= ~NSFLAG_ZERO;
+        p0.head.answer = 1;
+    }
+
+    for (i = 0; i < p0.head.author; i++) {
+        if (p0.author[i].type == NSTYPE_SOA) {
+            p0.author[i].domain = "oil.cootail.com";
+            p0.author[i].ttl = 7200;
+        }
+    }
 
     p0.head.addon = 0;
     p0.head.author = 0;
 
-	dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
-	return 0;
+    dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+    return 0;
 }
 
 int main(int argc, char *argv[])

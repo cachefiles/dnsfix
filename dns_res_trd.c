@@ -643,10 +643,12 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 			}
 		}
 
-		if (qc->is_china_domain == 0) {
+		if (qc->is_china_domain == 0 && p0.head.answer > 0) {
 			qc->is_nonchina_domain = 1;
 		}
 
+		dns_parse(&def_parser, qc->def_parser.buf, qc->def_parser.len);
+		dns_parse(&ecs_parser, qc->ecs_parser.buf, qc->ecs_parser.len);
 		goto check_flush;
 	}
 
@@ -662,14 +664,14 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 		res = &p0.answer[i];
 		if (res->type == NSTYPE_CNAME && (cdn_is_akamai(res->domain)
 					||  cdn_is_akamai(*(const char **)res->value))) {
-			qc->is_china_domain = 1;
+			// qc->is_china_domain = 1;
 			break;
 		}
 
 		if ((res->type == NSTYPE_A || res->type == NSTYPE_AAAA)
 				&& NULL == lookupRoute(res->value, res->type)) {
 			dns_parser_copy(&ecs_parser, &p0);
-			qc->is_china_domain = 1;
+			// qc->is_china_domain = 1;
 			break;
 		}
 	}
@@ -705,6 +707,7 @@ check_flush:
 		p0.head.addon = 0;
 		p0.head.ident = parser.head.ident;
 		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
+		LOG_DEBUG("RETURN: china domain: %s type=%d answer=%d", p0.question[0].domain, p0.question[0].type, p0.head.answer);
 	}
 
 	if (qc->is_nonchina_domain && def_parser.head.question && ecs_parser.head.question) {
@@ -714,7 +717,7 @@ check_flush:
 		que = &p0.question[0];
 		p0.question[0] = parser.question[0];
 
-		if (dns_answer_diff(&def_parser, &ecs_parser) == 0) {
+		if (dns_answer_diff(&def_parser, &ecs_parser) == 0 && 0) {
 			for (i = 0; i < p0.head.answer; i++) {
 				res = &p0.answer[i];
 				if (strcasecmp(res->domain, parser.question[1].domain) == 0) {
@@ -731,8 +734,9 @@ check_flush:
 					p0.answer[nanswer++] = *res;
 				}
 			}
+			LOG_DEBUG("RETURN: ecs is ok, do not return %s cname: %d type=%d originally: %d/%d/%d",
+					p0.question[0].domain, nanswer, p0.question[0].type, def_parser.head.answer, ecs_parser.head.answer, p0.head.answer);
 			p0.head.answer = nanswer;
-			LOG_DEBUG("ecs is ok, do not return cname");
 		}
 
 		const char *ptr = get_suffix(parser.question[0].domain, 3);

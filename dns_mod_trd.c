@@ -168,7 +168,7 @@ static int dns_contains(const char *domain)
 		}
 	}
 
-	if (strncmp(domain, "oc.", 3) == 0) {
+	if (strncmp(domain, "co.", 3) == 0) {
 		return 1;
 	}
 

@@ -64,6 +64,14 @@ struct dns_resource _predefine_resource_record[] = {
 		.ttl = 36000,
 		.len = 4,
 		.flags = 0,
+		.domain = "mtalk.google.com",
+		.value = {0x24, 04, 0x68, 0, 0x40, 8, 0xc, 0x02, 0, 0, 0, 0, 0, 0, 0, 0xbc}},
+	{
+		.type = NSTYPE_AAAA,
+		.klass = NSCLASS_INET,
+		.ttl = 36000,
+		.len = 4,
+		.flags = 0,
 		.domain = "ipv4only.arpa",
 		.value = {110, 42, 145, 164}},
 };
@@ -429,7 +437,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 
 	pp4 = &qc4->parser;
 	pp6 = &qc6->parser;
-	if (sb->ipv4_atime + 2 < time(NULL) || sb->ipv6_atime + 2 < time(NULL) ||
+	if (sb->ipv4_atime + 7 < time(NULL) || sb->ipv6_atime + 7 < time(NULL) ||
 			memcmp(&qc4->from.sin6_addr, &qc6->from.sin6_addr, sizeof(from->sin6_addr))) {
 		LOG_DEBUG("time expire detected: %s", p0.question[0].domain);
 		sb->preference = 100;
@@ -442,7 +450,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 			sb->preference = 100;
 			sb->checking = 0;
 		} else {
-			LOG_DEBUG("getaddrinfo detected: %s", pp4->question[0].domain);
+			LOG_DEBUG("getaddrinfo detected: %s %d", pp4->question[0].domain, qc4->nat64_pref);
 			qc4->score_board_id = hashid;
 			qc6->score_board_id = hashid;
 			sb->checking = 1;
@@ -806,6 +814,7 @@ check_finish:
 			LOG_DEBUG("update %s nat64 answer: %d pref64:%d", p0.question[0].domain, p0.head.answer, nat64_pref);
 			pp6->head.answer = p0.head.answer;
 			update_preference(sb, qc6, nat64_pref);
+			if (nat64_pref < 100) qc4->nat64_pref = nat64_pref;
 		}
 
 		LOG_DEBUG("pref:%d flags4:%x flags6:%x pref4:%d pref6:%d ", sb->preference, qc4->flags, qc6->flags, qc4->preference, qc6->preference);
@@ -815,9 +824,12 @@ check_finish:
 			if (qc4->preference == sb->preference || (qc4->flags & FLAG_ALL) == FLAG_ALL) {
 				pp = &qc4->parser;
 				pp->head.flags |= NSFLAG_QR;
+				int save = pp->head.answer;
 				pp->head.answer = (!(qc4->flags & FLAG_BLOCK_IPV4) && (qc4->preference <= sb->preference))? pp->head.answer: 0;
-				LOG_DEBUG("ipv4: d=%s n=%d", pp->question[0].domain, pp->head.answer);
+				LOG_DEBUG("ipv4: d=%s n=%d nat64_pref=%d", pp->question[0].domain, pp->head.answer, nat64_pref);
 				dns_sendto(ctx->sockfd, pp, &qc4->from, sizeof(qc4->from));
+				pp->head.answer = save;
+				if (nat64_pref < 100) qc4->nat64_pref = nat64_pref;
 			}
 
 			if (qc6->preference == sb->preference || (qc6->flags & FLAG_ALL) == FLAG_ALL) {
@@ -841,19 +853,25 @@ check_finish:
 		LOG_DEBUG("dns_sendto %s %s:%d d=%s n=%d type:%d pref:%d", pp->question[0].type==NSTYPE_AAAA?"ipv6":"ipv4", ntop6(qc->from.sin6_addr),
 				htons(qc->from.sin6_port), pp->question[0].domain, pp->head.answer, pp->question[0].type, qc->preference);
 		pp->head.flags |= NSFLAG_QR;
+		struct dns_parser modp0;
+		dns_parser_copy(&modp0, pp);
 
-		int save = pp->head.answer;
 		if (qc->flags & FLAG_BLOCK_IPV4 && pp->question[0].type == NSTYPE_A)
-			pp->head.answer = 0;
+			modp0.head.answer = 0;
 
-		dns_sendto(ctx->sockfd, pp, &qc->from, sizeof(qc->from));
-		pp->head.answer = save;
+		modp0.head.flags &=  ~(NSFLAG_RA|NSFLAG_RD);
+		for (int i = 0; i < modp0.head.answer;  i++) {
+			struct dns_resource *res = &modp0.answer[i];
+			res->ttl = 5;
+		}
+
+		dns_sendto(ctx->sockfd, &modp0, &qc->from, sizeof(qc->from));
 		pp = NULL;
 	}
 
 	if ((nat64_pref <= qc->nat64_pref) && (qc->updated || pp == NULL)) {
 		dns_parser_copy(&qc->parser, &p0);
-		qc->nat64_pref = nat64_pref;
+		if (nat64_pref < 100) qc->nat64_pref = nat64_pref;
 	} else if (qc->updated) {
 		dns_parser_copy(&qc->parser, &p0);
 	} else {

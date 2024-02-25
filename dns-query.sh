@@ -2,7 +2,7 @@
 
 C=$(od -An --endian=big -d -N 2)
 C=${C//[[:blank:]]/}
-URL=https://www.cootail.com/dns_query/ 
+URL=https://blocked.cootail.com/dns-query
 # URL=https://one.one.one.one/dns-query
 # (dd bs=$C count=1 status=none) | curl -H "Content-Type: application/dns-message" -H "Content-Length: $C" --data-binary @- $URL > /tmp/dns.data
 

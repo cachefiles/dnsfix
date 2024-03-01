@@ -144,6 +144,8 @@ struct dns_query_context {
 };
 
 static struct dns_query_context _orig_list[0xfff + 1];
+static struct dns_query_context _orig_list_ipv4[0xfff + 1];
+static struct dns_query_context _orig_list_ipv6[0xfff + 1];
 
 static int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
 {
@@ -325,6 +327,12 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 
 	struct dns_parser *p1 = NULL;
 	struct dns_query_context *qc = &_orig_list[offset];
+	if (p0.question[0].type == NSTYPE_AAAA) {
+		qc = &_orig_list_ipv6[offset];
+	} else if (p0.question[0].type == NSTYPE_A) {
+		qc = &_orig_list_ipv4[offset];
+	}
+
 	memset(qc, 0, sizeof(*qc));
 	qc->from = *from;
 
@@ -452,8 +460,18 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	int i, found = 0;
 	int offset = (p0.head.ident & 0xfff);
 	struct dns_query_context *qc = &_orig_list[offset];
+	if (p0.question[0].type == NSTYPE_AAAA) {
+		qc = &_orig_list_ipv6[offset];
+	} else if (p0.question[0].type == NSTYPE_A) {
+		qc = &_orig_list_ipv4[offset];
+	}
 
 	pp = &qc->parser;
+	int test = (p0.question[0].type != NSTYPE_PTR);
+	if (strcmp(p0.question[0].domain, pp->question[test].domain) || p0.question[0].type != pp->question[0].type) {
+		LOG_DEBUG("drop since name no expected: %s:%d %s:%d", p0.question[0].domain, p0.question[0].type, pp->question[test].domain, pp->question[0].type);
+		return 0;
+	}
 	p0.question[0] = pp->question[0];
 
 	for (i = 0; i < p0.head.answer; i++) {
@@ -488,7 +506,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	}
 #endif
 
-#if 1
+#if 0
 	for (i = 0; i < p0.head.answer; i++) {
 		res = &p0.answer[i];
 		if (res->type == NSTYPE_A) {

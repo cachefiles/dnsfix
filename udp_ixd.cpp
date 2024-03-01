@@ -25,6 +25,18 @@
 
 #include <txall.h>
 
+static uint32_t _last_rx = 0;
+static uint32_t _last_tx = 0;
+static uint32_t _total_tx = 0;
+static uint32_t _total_rx = 0;
+static time_t _last_foobar = 0;
+
+// tx_getticks
+static uint32_t _last_rx_tick = 0;
+static uint32_t _last_tx_tick = 0;
+static uint32_t _first_rx_tick = 0;
+static uint32_t _first_tx_tick = 0;
+
 struct timer_task {
     tx_task_t task; 
     tx_timer_t timer; 
@@ -49,6 +61,7 @@ typedef struct _nat_conntrack_t {
     struct sockaddr_in6 target;
 
     int port;
+    in6_addr address;
     tx_aiocb file;
     tx_task_t task;
     LIST_ENTRY(_nat_conntrack_t) entry;
@@ -110,16 +123,16 @@ static int conngc_session(time_t now, nat_conntrack_t *skip)
     return 0;
 }
 
-static nat_conntrack_t * lookup_session(struct sockaddr_in6 *from, uint16_t port)
+static nat_conntrack_t * lookup_session(struct sockaddr_in6 *from, uint16_t port, in6_addr addr)
 {
     nat_conntrack_t *item;
-    static uint32_t ZEROS[4] = {};
 
-    int hash_idx0 = get_connection_match_hash(&from->sin6_addr, ZEROS, port, from->sin6_port);
+    int hash_idx0 = get_connection_match_hash(&from->sin6_addr, &addr, port, from->sin6_port);
 
     item = _session_last[hash_idx0];
     if (item != NULL) {
         if ((item->source.sin6_port == from->sin6_port) && port == item->port &&
+				IN6_ARE_ADDR_EQUAL(&addr, &item->address) &&
                 IN6_ARE_ADDR_EQUAL(&item->source.sin6_addr, &from->sin6_addr)) {
             item->last_alive = time(NULL);
             return item;
@@ -128,6 +141,7 @@ static nat_conntrack_t * lookup_session(struct sockaddr_in6 *from, uint16_t port
 
     LIST_FOREACH(item, &_session_header, entry) {
         if ((item->source.sin6_port == from->sin6_port) && port == item->port &&
+				IN6_ARE_ADDR_EQUAL(&addr, &item->address) &&
                 IN6_ARE_ADDR_EQUAL(&item->source.sin6_addr, &from->sin6_addr)) {
             item->last_alive = time(NULL);
             assert(hash_idx0 == item->hash_idx);
@@ -153,6 +167,138 @@ static void update_timer(void *up)
 
 #define ALLOC_NEW(type)  (type *)calloc(1, sizeof(type))
 
+static int convert_from_ipv4(void *ipv6, const void *ipv4)
+{
+	unsigned *dest = (unsigned *)ipv6;
+	const unsigned *from = (const unsigned *)ipv4;
+
+	dest[0] = dest[1] = dest[2] = 0;
+	dest[2] = htonl(0xffff);
+	dest[3] = from[0];
+
+    return 0;
+}
+
+static int udp6_recvmsg(int fd, void *buf, size_t len, int flags, struct sockaddr_in6 *from, struct sockaddr_in6 *dst)
+{
+    int count;
+    struct iovec iovec[1];
+    struct msghdr msg;
+    char msg_control[1024];
+
+    iovec[0].iov_base = buf;
+    iovec[0].iov_len  = len;
+
+    msg.msg_flags = 0;
+    msg.msg_name = from;
+    msg.msg_namelen = sizeof(*from);
+
+    msg.msg_iov = iovec;
+    msg.msg_iovlen = sizeof(iovec) / sizeof(*iovec);
+
+    msg.msg_control = msg_control;
+    msg.msg_controllen = sizeof(msg_control);
+
+    count = recvmsg(fd, &msg, flags);
+
+    if (count > 0) {
+        struct cmsghdr *cmsg;
+        for(cmsg = CMSG_FIRSTHDR(&msg);
+                cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+            if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
+                struct in_pktinfo *info = (struct in_pktinfo*)CMSG_DATA(cmsg);
+                // LOG_VERBOSE("message received on address %s\n", inet_ntoa(info->ipi_addr));
+				convert_from_ipv4(&dst->sin6_addr, &info->ipi_addr);
+            }
+
+            if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
+				char b[63];
+                struct in6_pktinfo *info = (struct in6_pktinfo*)CMSG_DATA(cmsg);
+                // LOG_VERBOSE("message received on address %s\n", inet_ntop(AF_INET6, &info->ipi6_addr, b, sizeof(b)));
+				dst->sin6_addr = info->ipi6_addr;
+            }
+        }
+    }
+
+    return count;
+}
+
+static int udp6_sendmsg(int fd, const void *buf, size_t len, int flags, const struct sockaddr_in6 *from, const struct sockaddr_in6 *dest)
+{
+    struct msghdr msg;
+    struct iovec iovec[1];
+    char msg_control[1024];
+
+    iovec[0].iov_len  = len;
+    iovec[0].iov_base = (void *)buf;
+
+    msg.msg_flags = 0;
+    msg.msg_name = (void *)dest;
+    msg.msg_namelen = sizeof(*dest);
+
+    msg.msg_iov = iovec;
+    msg.msg_iovlen = sizeof(iovec) / sizeof(*iovec);
+
+    msg.msg_control = msg_control;
+    msg.msg_controllen = sizeof(msg_control);
+
+    int cmsg_space = 0;
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    const int have_in6_pktinfo = 1, have_in_pktinfo = 0;
+
+    if (have_in6_pktinfo) {
+        struct in6_pktinfo in6_pktinfo = {};
+		in6_pktinfo.ipi6_addr = from->sin6_addr;
+
+#if 0
+		char b[63];
+		LOG_VERBOSE("message send to address %s\n", inet_ntop(AF_INET6, &from->sin6_addr, b, sizeof(b)));
+#endif
+
+        cmsg->cmsg_level = IPPROTO_IPV6;
+        cmsg->cmsg_type = IPV6_PKTINFO;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(in6_pktinfo));
+        *(struct in6_pktinfo*)CMSG_DATA(cmsg) = in6_pktinfo;
+        cmsg_space += CMSG_SPACE(sizeof(in6_pktinfo));
+    }
+
+    if (have_in_pktinfo) {
+        struct in_pktinfo in_pktinfo = {};
+        cmsg->cmsg_level = IPPROTO_IP;
+        cmsg->cmsg_type = IP_PKTINFO;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(in_pktinfo));
+        *(struct in_pktinfo*)CMSG_DATA(cmsg) = in_pktinfo;
+        cmsg_space += CMSG_SPACE(sizeof(in_pktinfo));
+    }
+
+    msg.msg_controllen = cmsg_space;
+
+    return sendmsg(fd, &msg, flags);
+}
+
+#define NONZERO(x) (x > 1? x: 1)
+static uint64_t _tx_bytes = 0;
+static uint64_t _rx_bytes = 0;
+
+static void showbar(const char *title, size_t count)
+{
+	if (_last_foobar == time(NULL)) {
+		return;
+	}
+
+	int tx_rate = (_total_tx - _last_tx) * 1000 / NONZERO(_last_tx_tick - _first_tx_tick);
+	int rx_rate = (_total_rx - _last_rx) * 1000 / NONZERO(_last_rx_tick - _first_rx_tick);
+
+	_rx_bytes += (_total_rx - _last_rx);
+	_tx_bytes += (_total_tx - _last_tx);
+
+	LOG_VERBOSE("%s len %d, tx/rx rate: %d/%d total: %ld/%ld", title, count, tx_rate, rx_rate, _tx_bytes, _rx_bytes);
+	_first_tx_tick = _first_rx_tick = 0;
+	_last_foobar = time(NULL);
+	_last_tx = _total_tx;
+	_last_rx = _total_rx;
+}
+
 static void do_udp_exchange_back(void *upp)
 {
     int count;
@@ -169,22 +315,29 @@ static void do_udp_exchange_back(void *upp)
         tx_aincb_update(&up->file, count);
 
         if (count <= 0) {
-            LOG_VERBOSE("back recvfrom len %d, %d, strerr %s", count, errno, strerror(errno));
+			showbar("recvfrom ", count);
             break;
         }
 
         struct sockaddr *inp = (struct sockaddr *)&up->source;
-        count = sendto(up->mainfd, buf, count, MSG_DONTWAIT, inp, sizeof(up->source));
+		struct sockaddr_in6 dest = {.sin6_addr = up->address};
+        count = udp6_sendmsg(up->mainfd, buf, count, MSG_DONTWAIT, &dest, &up->source);
         if (count == -1) {
             LOG_VERBOSE("back sendto len %d, %d, strerr %s", count, errno, strerror(errno));
         }
+
+		if (count > 0) {
+			if (!_first_tx_tick) _first_tx_tick = tx_getticks();
+			_last_tx_tick = tx_getticks();
+			_total_tx += count;
+		}
     }
 
     tx_aincb_active(&up->file, &up->task);
     return;
 }
 
-static nat_conntrack_t * newconn_session(struct sockaddr_in6 *from, int mainfd, int port, int dport)
+static nat_conntrack_t * newconn_session(struct sockaddr_in6 *from, int mainfd, int port, int dport, in6_addr addr)
 {
     int sockfd;
     int rcvbufsiz = 4096;
@@ -201,6 +354,7 @@ static nat_conntrack_t * newconn_session(struct sockaddr_in6 *from, int mainfd, 
         conn->target = *from;
         conn->mainfd = mainfd;
         conn->port   = port;
+		conn->address = addr;
         memset(&conn->target.sin6_addr, 0xff, 12);
         memset(&conn->target.sin6_addr, 0, 10);
 		if (getenv("REDIR_HOST"))
@@ -220,8 +374,7 @@ static nat_conntrack_t * newconn_session(struct sockaddr_in6 *from, int mainfd, 
 
         tx_aincb_active(&conn->file, &conn->task);
 
-        static uint32_t ZEROS[4] = {};
-        conn->hash_idx = get_connection_match_hash(&from->sin6_addr, ZEROS, port, from->sin6_port);
+        conn->hash_idx = get_connection_match_hash(&from->sin6_addr, &addr, port, from->sin6_port);
         LIST_INSERT_HEAD(&_session_header, conn, entry);
         _session_last[conn->hash_idx] = conn;
     }
@@ -229,6 +382,8 @@ static nat_conntrack_t * newconn_session(struct sockaddr_in6 *from, int mainfd, 
     conngc_session(now, conn);
     return conn;
 }
+
+static int _XOR_MASK_ = 0x5a;
 
 static void do_udp_exchange_recv(void *upp)
 {
@@ -238,28 +393,33 @@ static void do_udp_exchange_recv(void *upp)
     nat_conntrack_t *session = NULL;
 
     struct sockaddr_in6 in6addr;
+    struct sockaddr_in6 dest;
     struct sockaddr * inaddr = (struct sockaddr *)&in6addr;
     udp_exchange_context *up = (udp_exchange_context *)upp;
 
     while (tx_readable(&up->file)) {
         in_len = sizeof(in6addr);
-        count = recvfrom(up->sockfd, buf, sizeof(buf), MSG_DONTWAIT, inaddr, &in_len);
+        count = udp6_recvmsg(up->sockfd, buf, sizeof(buf), MSG_DONTWAIT, &in6addr, &dest);
         tx_aincb_update(&up->file, count);
 
         if (count <= 0) {
-            LOG_VERBOSE("recvfrom len %d, %d, strerr %s", count, errno, strerror(errno));
+			showbar("back forward ", count);
             break;
         }
 
-        session = lookup_session(&in6addr, up->port);
-        session = session? session: newconn_session(&in6addr, up->sockfd, up->port, up->dport);
+		_total_rx += count;
+		if (!_first_rx_tick) _first_rx_tick = tx_getticks();
+		_last_rx_tick = tx_getticks();
+
+        session = lookup_session(&in6addr, up->port, dest.sin6_addr);
+        session = session? session: newconn_session(&in6addr, up->sockfd, up->port, up->dport, dest.sin6_addr);
         if (session == NULL) {
             LOG_INFO("session is NULL");
             continue;
         }
 
         struct sockaddr *inp = (struct sockaddr *)&session->target;
-        // buf[0] ^= 0x5a;
+        buf[0] ^= _XOR_MASK_;
         count = sendto(session->sockfd, buf, count, MSG_DONTWAIT, inp, sizeof(session->target));
         if (count == -1) {
             LOG_VERBOSE("sendto len %d, %d, strerr %s", count, errno, strerror(errno));
@@ -288,6 +448,12 @@ static void * udp_exchange_create(int port, int dport)
     in6addr.sin6_port = htons(port);
     in6addr.sin6_addr = in6addr_loopback;
     in6addr.sin6_addr = in6addr_any;
+
+	int yes = 1;
+	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+	setsockopt(sockfd, IPPROTO_IP, IP_PKTINFO, &yes, sizeof(yes));
+	setsockopt(sockfd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &yes, sizeof(yes));
+	setsockopt(sockfd, SOL_IP, IP_TRANSPARENT, &yes, sizeof(yes));
 
     error = bind(sockfd, (struct sockaddr *)&in6addr, sizeof(in6addr));
     TX_CHECK(error == 0, "bind udp socket failure");
@@ -327,7 +493,12 @@ int main(int argc, char *argv[])
     tx_timer_reset(&tmtask.timer, 500);
 
     for (int i = 1; i < argc; i++) {
-	int port, dport, match;
+		int port, dport, match;
+		if (strcmp(argv[i], "-x") == 0 && i + 1 < argc) {
+			_XOR_MASK_ = atoi(argv[++i]);
+			continue;
+		}
+ 
         match = sscanf(argv[i], "%d:%d", &port, &dport);
         switch (match) {
             case 1:

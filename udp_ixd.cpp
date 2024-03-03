@@ -103,7 +103,7 @@ static int conngc_session(time_t now, nat_conntrack_t *skip)
 
             if ((item->last_alive > now) ||
                     (item->last_alive + timeout < now)) {
-                LOG_INFO("free datagram connection: %p, %d\n", skip, 0);
+                LOG_DEBUG("free datagram connection: %p, %d\n", skip, 0);
                 int hash_idx = item->hash_idx;
 
                 if (item == _session_last[hash_idx]) {
@@ -153,13 +153,47 @@ static nat_conntrack_t * lookup_session(struct sockaddr_in6 *from, uint16_t port
     return NULL;
 }
 
+#define NONZERO(x) (x > 1? x: 1)
+static uint64_t _tx_bytes = 0;
+static uint64_t _rx_bytes = 0;
+static char _last_log[4096] = {};
+
+static void showbar(const char *title, size_t count)
+{
+	time_t foobar = 0;
+	time_t delta  = _last_foobar ^ time(&foobar);
+
+	if ((delta >> 1) == 0) {
+		return;
+	}
+
+	int tx_rate = (_total_tx - _last_tx) * 1000 / NONZERO(_last_tx_tick - _first_tx_tick);
+	int rx_rate = (_total_rx - _last_rx) * 1000 / NONZERO(_last_rx_tick - _first_rx_tick);
+
+	_rx_bytes += (_total_rx - _last_rx);
+	_tx_bytes += (_total_tx - _last_tx);
+
+	LOG_INFO("%s len %d, rx/tx total: %ld/%ld rate: %d/%d ", title, count, _tx_bytes, _rx_bytes, tx_rate, rx_rate);
+	LOG_INFO("%s", _last_log);
+	_last_log[0] = 0;
+	_first_tx_tick = _first_rx_tick = 0;
+	// _first_rx_tick = _first_tx_tick = tx_getticks();
+
+	_last_foobar = foobar;
+	_last_tx = _total_tx;
+	_last_rx = _total_rx;
+}
+
 static void update_timer(void *up)
 {
     struct timer_task *ttp;
     ttp = (struct timer_task*)up;
 
-    tx_timer_reset(&ttp->timer, 50000);
-    LOG_INFO("update_timer %d\n", tx_ticks);
+    tx_timer_reset(&ttp->timer, 5000);
+	log_set_lastbuf(NULL, 0);
+    LOG_DEBUG("update_timer %d\n", tx_ticks);
+	showbar("showbar", 0);
+	log_set_lastbuf(_last_log, sizeof(_last_log));
 
     conngc_session(time(NULL), NULL);
     return;
@@ -207,14 +241,14 @@ static int udp6_recvmsg(int fd, void *buf, size_t len, int flags, struct sockadd
                 cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
             if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
                 struct in_pktinfo *info = (struct in_pktinfo*)CMSG_DATA(cmsg);
-                // LOG_VERBOSE("message received on address %s\n", inet_ntoa(info->ipi_addr));
+                LOG_VERBOSE("message received on address %s\n", inet_ntoa(info->ipi_addr));
 				convert_from_ipv4(&dst->sin6_addr, &info->ipi_addr);
             }
 
             if (cmsg->cmsg_level == IPPROTO_IPV6 && cmsg->cmsg_type == IPV6_PKTINFO) {
 				char b[63];
                 struct in6_pktinfo *info = (struct in6_pktinfo*)CMSG_DATA(cmsg);
-                // LOG_VERBOSE("message received on address %s\n", inet_ntop(AF_INET6, &info->ipi6_addr, b, sizeof(b)));
+                LOG_VERBOSE("message received on address %s\n", inet_ntop(AF_INET6, &info->ipi6_addr, b, sizeof(b)));
 				dst->sin6_addr = info->ipi6_addr;
             }
         }
@@ -250,10 +284,8 @@ static int udp6_sendmsg(int fd, const void *buf, size_t len, int flags, const st
         struct in6_pktinfo in6_pktinfo = {};
 		in6_pktinfo.ipi6_addr = from->sin6_addr;
 
-#if 0
 		char b[63];
 		LOG_VERBOSE("message send to address %s\n", inet_ntop(AF_INET6, &from->sin6_addr, b, sizeof(b)));
-#endif
 
         cmsg->cmsg_level = IPPROTO_IPV6;
         cmsg->cmsg_type = IPV6_PKTINFO;
@@ -276,29 +308,6 @@ static int udp6_sendmsg(int fd, const void *buf, size_t len, int flags, const st
     return sendmsg(fd, &msg, flags);
 }
 
-#define NONZERO(x) (x > 1? x: 1)
-static uint64_t _tx_bytes = 0;
-static uint64_t _rx_bytes = 0;
-
-static void showbar(const char *title, size_t count)
-{
-	if (_last_foobar == time(NULL)) {
-		return;
-	}
-
-	int tx_rate = (_total_tx - _last_tx) * 1000 / NONZERO(_last_tx_tick - _first_tx_tick);
-	int rx_rate = (_total_rx - _last_rx) * 1000 / NONZERO(_last_rx_tick - _first_rx_tick);
-
-	_rx_bytes += (_total_rx - _last_rx);
-	_tx_bytes += (_total_tx - _last_tx);
-
-	LOG_VERBOSE("%s len %d, tx/rx rate: %d/%d total: %ld/%ld", title, count, tx_rate, rx_rate, _tx_bytes, _rx_bytes);
-	_first_tx_tick = _first_rx_tick = 0;
-	_last_foobar = time(NULL);
-	_last_tx = _total_tx;
-	_last_rx = _total_rx;
-}
-
 static void do_udp_exchange_back(void *upp)
 {
     int count;
@@ -315,7 +324,7 @@ static void do_udp_exchange_back(void *upp)
         tx_aincb_update(&up->file, count);
 
         if (count <= 0) {
-			showbar("recvfrom ", count);
+			LOG_VERBOSE("recvfrom len %d, %d, strerr %s", count, errno, strerror(errno));
             break;
         }
 
@@ -323,7 +332,7 @@ static void do_udp_exchange_back(void *upp)
 		struct sockaddr_in6 dest = {.sin6_addr = up->address};
         count = udp6_sendmsg(up->mainfd, buf, count, MSG_DONTWAIT, &dest, &up->source);
         if (count == -1) {
-            LOG_VERBOSE("back sendto len %d, %d, strerr %s", count, errno, strerror(errno));
+            LOG_DEBUG("back sendto len %d, %d, strerr %s", count, errno, strerror(errno));
         }
 
 		if (count > 0) {
@@ -365,7 +374,10 @@ static nat_conntrack_t * newconn_session(struct sockaddr_in6 *from, int mainfd, 
         TX_CHECK(sockfd != -1, "create udp socket failure");
 
         tx_setblockopt(sockfd, 0);
-        // setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, (char *)&rcvbufsiz, sizeof(rcvbufsiz));
+        // setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvbufsiz, sizeof(rcvbufsiz));
+
+		int sndbufsiz = 1638400;
+        setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &sndbufsiz, sizeof(sndbufsiz));
         conn->sockfd = sockfd;
 
         tx_loop_t *loop = tx_loop_default();
@@ -403,7 +415,7 @@ static void do_udp_exchange_recv(void *upp)
         tx_aincb_update(&up->file, count);
 
         if (count <= 0) {
-			showbar("back forward ", count);
+			LOG_VERBOSE("back recvfrom len %d, %d, strerr %s", count, errno, strerror(errno));
             break;
         }
 
@@ -414,7 +426,7 @@ static void do_udp_exchange_recv(void *upp)
         session = lookup_session(&in6addr, up->port, dest.sin6_addr);
         session = session? session: newconn_session(&in6addr, up->sockfd, up->port, up->dport, dest.sin6_addr);
         if (session == NULL) {
-            LOG_INFO("session is NULL");
+            LOG_DEBUG("session is NULL");
             continue;
         }
 
@@ -422,7 +434,7 @@ static void do_udp_exchange_recv(void *upp)
         buf[0] ^= _XOR_MASK_;
         count = sendto(session->sockfd, buf, count, MSG_DONTWAIT, inp, sizeof(session->target));
         if (count == -1) {
-            LOG_VERBOSE("sendto len %d, %d, strerr %s", count, errno, strerror(errno));
+            LOG_DEBUG("sendto len %d, %d, strerr %s", count, errno, strerror(errno));
         }
     }
 
@@ -442,7 +454,9 @@ static void * udp_exchange_create(int port, int dport)
 
     tx_setblockopt(sockfd, 0);
     int rcvbufsiz = 4096;
-    // setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, (char *)&rcvbufsiz, sizeof(rcvbufsiz));
+    // setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvbufsiz, sizeof(rcvbufsiz));
+	int sndbufsiz = 1638400;
+	setsockopt(sockfd, SOL_SOCKET, SO_SNDBUF, &sndbufsiz, sizeof(sndbufsiz));
 
     in6addr.sin6_family = AF_INET6;
     in6addr.sin6_port = htons(port);
@@ -518,6 +532,7 @@ int main(int argc, char *argv[])
         }
     }
 
+	log_set_lastbuf(_last_log, sizeof(_last_log));
     tx_loop_main(loop);
 
     tx_timer_stop(&tmtask.timer);

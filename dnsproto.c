@@ -515,7 +515,7 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 
 	dotp = (uint8_t *)(phead + 1);
 	memset(parser->comptr, 0, sizeof(parser->comptr));
-	// parser->comptr[0] = frame;
+	parser->comptr[0] = frame;
 
 	assert(parser->head.question < MAX_RECORD_COUNT);
 	for (num = 0; dotp < limit && num < parser->head.question; num ++)  {

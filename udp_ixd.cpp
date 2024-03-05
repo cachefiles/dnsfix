@@ -432,7 +432,23 @@ static void do_udp_exchange_recv(void *upp)
 
         struct sockaddr *inp = (struct sockaddr *)&session->target;
         buf[0] ^= _XOR_MASK_;
-        count = sendto(session->sockfd, buf, count, MSG_DONTWAIT, inp, sizeof(session->target));
+		int padding = 0;
+		struct sockaddr_in6 trop;
+		trop.sin6_family = AF_INET6;
+		trop.sin6_port   = htons(443);
+
+		if (getenv("PING")) {
+			memcpy(buf + count, ((uint32_t *)&dest.sin6_addr) + 3, 4);
+			padding = 4;
+		} else if (getenv("PONG")) {
+			uint32_t *troping = (uint32_t *)&trop.sin6_addr;
+			troping[0] = troping[1] = 0; troping[2] = htonl(0xffff);
+			memcpy(troping + 3, buf + count - 4, 4);
+			padding = -4;
+			inp = (struct sockaddr *)&trop;
+		}
+
+        count = sendto(session->sockfd, buf, count + padding, MSG_DONTWAIT, inp, sizeof(session->target));
         if (count == -1) {
             LOG_DEBUG("sendto len %d, %d, strerr %s", count, errno, strerror(errno));
         }

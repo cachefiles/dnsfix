@@ -580,7 +580,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 	assert (p0.question[0].domain);
 	dns_parse(&parser, qc->parser.buf, qc->parser.len);
-	if (strcmp(parser.question[1].domain, p0.question[0].domain)) {
+	if (strcasecmp(parser.question[1].domain, p0.question[0].domain)) {
 		struct dns_parser p1 = {};
 		const char *domain = p0.question[0].domain;
 		LOG_DEBUG("query soa: %s %s ", parser.question[1].domain, p0.question[0].domain);
@@ -706,6 +706,7 @@ check_flush:
 
 		p0.head.addon = 0;
 		p0.head.ident = parser.head.ident;
+		p0.head.flags |= NSFLAG_AA;
 		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 		LOG_DEBUG("RETURN: china domain: %s type=%d answer=%d", p0.question[0].domain, p0.question[0].type, p0.head.answer);
 	}
@@ -750,6 +751,7 @@ check_flush:
 		}
 
 		p0.head.ident = parser.head.ident;
+		p0.head.flags |= NSFLAG_AA;
 		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 	}
 

@@ -165,12 +165,12 @@ static int dns_contains(const char *domain)
 	};
 
 	for (i = 0; _tld0[i]; i++) {
-		if (strncmp(domain, _tld0[i], 4) == 0) {
+		if (strncasecmp(domain, _tld0[i], 4) == 0) {
 			return 1;
 		}
 	}
 
-	if (strncmp(domain, "co.", 3) == 0) {
+	if (strncasecmp(domain, "co.", 3) == 0) {
 		return 1;
 	}
 

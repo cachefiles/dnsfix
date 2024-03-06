@@ -157,8 +157,8 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 					valptr += sizeof(dopt);
 					assert(valptr < vallimit);
 					assert(buf + res->len >= dopt);
-					res->len >= 360 && printf("res->len=%d: type=%d\n", res->len, res->type);
-					assert(res->len < 360);
+					res->len > 500 && printf("res->len=%d: type=%d\n", res->len, res->type);
+					assert(res->len <= 500);
 					void * dotp0 = add_value(parse, dopt, buf + res->len - dopt);
 					assert(dotp0 != NULL);
 					memcpy(btr, &dotp0, sizeof(dotp0));
@@ -251,11 +251,9 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 	dotp = (const uint8_t *)(phead + 1);
 	limit = (const uint8_t *)(frame + len);
 
-	if (parser->head.question >= MAX_RECORD_COUNT ||
+	if (parser->head.question >= COUNTOF(parser->question) ||
 			parser->head.question == 0 ||
-			parser->head.answer >= MAX_RECORD_COUNT ||
-			parser->head.author >= MAX_RECORD_COUNT ||
-			parser->head.addon >= MAX_RECORD_COUNT) {
+			parser->head.answer + parser->head.author  + parser->head.addon >= MAX_RECORD_COUNT) {
 		fprintf(stderr, "H: %d/%d/%d/%d\n",
 				parser->head.question, parser->head.answer,
 				parser->head.author, parser->head.addon); 
@@ -286,6 +284,10 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 		return NULL;
 	}
 
+	
+	int nrecord = 0;
+	parser->answer = parser->records + nrecord;
+
 	for (num = 0; dotp < limit && num < parser->head.answer; num ++)  {
 		res = &parser->answer[num];
 
@@ -311,6 +313,8 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 		return NULL;
 	}
 
+	nrecord += num;
+	parser->author = parser->records + nrecord;
 	for (num = 0; dotp < limit && num < parser->head.author; num ++)  {
 		res = &parser->author[num];
 
@@ -336,6 +340,8 @@ struct dns_parser * dns_parse(struct dns_parser *parser, const uint8_t *frame, s
 		return NULL;
 	}
 
+	nrecord += num;
+	parser->addon = parser->records + nrecord;
 	for (num = 0; dotp < limit && num < parser->head.addon; num ++)  {
 		res = &parser->addon[num];
 
@@ -517,7 +523,7 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 	memset(parser->comptr, 0, sizeof(parser->comptr));
 	parser->comptr[0] = frame;
 
-	assert(parser->head.question < MAX_RECORD_COUNT);
+	assert(parser->head.question < COUNTOF(parser->question));
 	for (num = 0; dotp < limit && num < parser->head.question; num ++)  {
 		nsq = &parser->question[num];
 		dotp = dn_put_domain(dotp, limit, nsq->domain, parser->comptr, ARRAY_SIZE(parser->comptr));
@@ -525,7 +531,7 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 		dotp = dn_put_short(dotp, limit, nsq->klass);
 	}
 
-	assert(parser->head.answer < MAX_RECORD_COUNT);
+	assert(parser->head.answer  + parser->head.addon + parser->head.author < MAX_RECORD_COUNT);
 	for (num = 0; dotp < limit && num < parser->head.answer; num ++)  {
 		res = &parser->answer[num];
 		char ** cname = (char **)res->value;
@@ -537,13 +543,11 @@ int dns_build(struct dns_parser *parser, uint8_t *frame, size_t len)
 		dotp = dn_put_resource(dotp, limit, res, parser);
 	}
 
-	assert(parser->head.author < MAX_RECORD_COUNT);
 	for (num = 0; dotp < limit && num < parser->head.author; num ++)  {
 		res = &parser->author[num];
 		dotp = dn_put_resource(dotp, limit, res, parser);
 	}
 
-	assert(parser->head.addon < MAX_RECORD_COUNT);
 	for (num = 0; dotp < limit && num < parser->head.addon; num ++)  {
 		res = &parser->addon[num];
 		dotp = dn_put_resource(dotp, limit, res, parser);

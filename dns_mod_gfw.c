@@ -186,12 +186,12 @@ static int dns_contains(const char *domain)
 
 	(void)_tld1;
 	for (i = 0; _tld0[i]; i++) {
-		if (strncmp(domain, _tld0[i], 4) == 0) {
+		if (strncasecmp(domain, _tld0[i], 4) == 0) {
 			return 1;
 		}
 	}
 
-	if (strncmp(domain, "oc.", 3) == 0) {
+	if (strncasecmp(domain, "oc.", 3) == 0) {
 		return 1;
 	}
 

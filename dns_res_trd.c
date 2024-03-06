@@ -205,12 +205,12 @@ static int dns_contains(const char *domain)
 
 	(void)_tld1;
 	for (i = 0; _tld0[i]; i++) {
-		if (strncmp(domain, _tld0[i], 4) == 0) {
+		if (strncasecmp(domain, _tld0[i], 4) == 0) {
 			return 1;
 		}
 	}
 
-	if (strncmp(domain, "oc.", 3) == 0) {
+	if (strncasecmp(domain, "oc.", 3) == 0) {
 		return 1;
 	}
 
@@ -373,7 +373,6 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	uint8_t optbuf[256];
 	add_client_subnet(&p0, optbuf, &subnet4_data);
 	
-	p0.head.ident += 0x1000;
 	p0.head.flags |= NSFLAG_RD;
 	retval = dns_sendto(ctx->outfd, &p0, ctx->ecsaddr, ctx->dnslen);
 	if (retval == -1) {
@@ -381,12 +380,16 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 		return 0;
 	}
 
-	p0.head.addon = 0;
+	if (p0.head.addon > 0
+			&& p0.addon[0].len > 0 
+			&& p0.addon[0].type == NSTYPE_OPT)
+		p0.addon[0].len = 0;
 #if 0
 	if (p0.question[0].type == NSTYPE_AAAA)
 		add_client_subnet(&p0, optbuf, &subnet6_data);
 #endif
 
+	p0.head.ident += 0x1000;
 	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
 	if (retval == -1) {
 		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
@@ -584,7 +587,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 	assert (p0.question[0].domain);
 	dns_parse(&parser, qc->parser.buf, qc->parser.len);
-	if (strcmp(parser.question[1].domain, p0.question[0].domain)) {
+	if (strcasecmp(parser.question[1].domain, p0.question[0].domain)) {
 		struct dns_parser p1 = {};
 		const char *domain = p0.question[0].domain;
 		LOG_DEBUG("query soa: %s %s ", parser.question[1].domain, p0.question[0].domain);
@@ -710,6 +713,7 @@ check_flush:
 
 		p0.head.addon = 0;
 		p0.head.ident = parser.head.ident;
+		p0.head.flags |= NSFLAG_AA;
 		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 		LOG_DEBUG("RETURN: china domain: %s type=%d answer=%d", p0.question[0].domain, p0.question[0].type, p0.head.answer);
 	}
@@ -754,6 +758,7 @@ check_flush:
 		}
 
 		p0.head.ident = parser.head.ident;
+		p0.head.flags |= NSFLAG_AA;
 		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 	}
 

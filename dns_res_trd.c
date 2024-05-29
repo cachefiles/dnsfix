@@ -205,12 +205,12 @@ static int dns_contains(const char *domain)
 
 	(void)_tld1;
 	for (i = 0; _tld0[i]; i++) {
-		if (strncmp(domain, _tld0[i], 4) == 0) {
+		if (strncasecmp(domain, _tld0[i], 4) == 0) {
 			return 1;
 		}
 	}
 
-	if (strncmp(domain, "oc.", 3) == 0) {
+	if (strncasecmp(domain, "oc.", 3) == 0) {
 		return 1;
 	}
 
@@ -369,7 +369,6 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	uint8_t optbuf[256];
 	add_client_subnet(&p0, optbuf, &subnet4_data);
 	
-	p0.head.ident += 0x1000;
 	p0.head.flags |= NSFLAG_RD;
 	retval = dns_sendto(ctx->outfd, &p0, ctx->ecsaddr, ctx->dnslen);
 	if (retval == -1) {
@@ -377,12 +376,16 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 		return 0;
 	}
 
-	p0.head.addon = 0;
+	if (p0.head.addon > 0
+			&& p0.addon[0].len > 0 
+			&& p0.addon[0].type == NSTYPE_OPT)
+		p0.addon[0].len = 0;
 #if 0
 	if (p0.question[0].type == NSTYPE_AAAA)
 		add_client_subnet(&p0, optbuf, &subnet6_data);
 #endif
 
+	p0.head.ident += 0x1000;
 	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
 	if (retval == -1) {
 		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);

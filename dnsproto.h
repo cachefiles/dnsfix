@@ -38,7 +38,8 @@
 #define NSSIG_SVCB  "B"
 #define NSSIG_HTTPS "B"
 
-#define MAX_RECORD_COUNT 32
+#define MAX_RECORD_COUNT 64
+
 // #define DN_EXPANDED 0x8000
 
 #define NSFLAG_QR    0x8000
@@ -90,11 +91,14 @@ struct dns_parser {
 	uint8_t *comptr[MAX_RECORD_COUNT * 2];
 
 	struct dns_header head;
-	struct dns_question question[MAX_RECORD_COUNT];
-	struct dns_resource answer[MAX_RECORD_COUNT];
-	struct dns_resource author[MAX_RECORD_COUNT];
-	struct dns_resource addon[MAX_RECORD_COUNT];
+	struct dns_question question[4];
+	struct dns_resource *answer;
+	struct dns_resource *author;
+	struct dns_resource *addon;
+	struct dns_resource records[MAX_RECORD_COUNT];
 };
+
+#define COUNTOF(arr) (sizeof(arr)/sizeof(arr[0]))
 
 #ifdef __cplusplus 
 extern "C" { 

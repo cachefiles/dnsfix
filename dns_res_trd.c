@@ -214,6 +214,10 @@ static int dns_contains(const char *domain)
 		return 1;
 	}
 
+	if (strncmp(domain, "co.", 3) == 0) {
+		return 1;
+	}
+
 	return 0;
 }
 

@@ -781,16 +781,14 @@ int main(int argc, char *argv[])
 			addrl = sizeof(myaddr);
 			count = recvfrom(outfd, buf, sizeof(buf), 0, paddr, &addrl);
 			count > 0 || LOG_DEBUG("outfd is readable count=%d", count);
-			assert(count > 0);
-			do_dns_backward(&c0, buf, count, &myaddr);
+			if (count > 0) do_dns_backward(&c0, buf, count, &myaddr);
 		}
 
 		if (FD_ISSET(sockfd, &readfds)) {
 			addrl = sizeof(myaddr6);
 			count = recvfrom(sockfd, buf, sizeof(buf), 0, paddr1, &addrl);
 			count > 0 || LOG_DEBUG("sockfd is readable: %d", count);
-			assert(count > 0);
-			do_dns_forward(&c0, buf, count, &myaddr6);
+			if (count > 0) do_dns_forward(&c0, buf, count, &myaddr6);
 		}
 
 	} while (retval >= 0);

@@ -45,8 +45,8 @@ struct dns_soa {
 };
 
 static struct dns_soa _rr_soa = {
-        .name_server = "ns2.cootail.com",
-        .admin_email = "admin.cootail.com",
+        .name_server = "ns2.603030.xyz",
+        .admin_email = "admin.603030.xyz",
         .serial = 20231523,
         .day2 = 7200,
         .day3 = 1800,
@@ -93,7 +93,7 @@ struct dns_resource _predefine_resource_record[] = {
 		.ttl = 36000,
 		.len = 4,
 		.flags = 0,
-		.domain = "mtalk.oogleg.moc.cootail.com",
+		.domain = "mtalk.oogleg.moc.603030.xyz",
 		.value = {10, 0, 3, 1}},
 	{
 		.type = NSTYPE_A,
@@ -241,9 +241,9 @@ static int dns_rewrap(struct dns_parser *p1)
 		return -1;
 	}
 
-	if (ndot > 3 && !strcasecmp(dots[(ndot - 3) & 0x7], "oil.cootail.com")) {
+	if (ndot > 3 && !strcasecmp(dots[(ndot - 3) & 0x7], "oil.603030.xyz")) {
 		*que1 = *que;
-		p1->addon[0].domain = add_domain(p1, "oil.cootail.com");
+		p1->addon[0].domain = add_domain(p1, "oil.603030.xyz");
 		p1->addon[0].klass = NSCLASS_INET;
 		p1->addon[0].type = NSTYPE_A;
 		p1->addon[0].ttl = 3600;
@@ -420,8 +420,8 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
         return 0;
     }
 
-    const char *myzone = strcasestr(p0.question[0].domain, "oil.cootail.com");
-    if (myzone == NULL || strcasecmp(myzone, "oil.cootail.com") || p0.question[0].type == NSTYPE_CNAME) {
+    const char *myzone = strcasestr(p0.question[0].domain, "oil.603030.xyz");
+    if (myzone == NULL || strcasecmp(myzone, "oil.603030.xyz") || p0.question[0].type == NSTYPE_CNAME) {
         p0.head.flags |= RCODE_NXDOMAIN;
         p0.head.flags |= NSFLAG_QR;
         dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
@@ -473,7 +473,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
         return 0;
     }
 
-    if (zone != NULL && strcasecmp(zone, "oil.cootail.com") == 0) {
+    if (zone != NULL && strcasecmp(zone, "oil.603030.xyz") == 0) {
         p0.question[0] = p1->question[1];
         p0.head.flags &= ~NSFLAG_QR;
         p0.head.flags &= ~NSFLAG_RD;
@@ -663,7 +663,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
                 if (p0.answer[i].type == NSTYPE_AAAA)
                     memset(p0.answer[i].value, 0xfe, 16);
                 if (p0.answer[i].type == NSTYPE_CNAME)
-                    *(char **)p0.answer[i].value = "chinazone.cootail.com";
+                    *(char **)p0.answer[i].value = "chinazone.603030.xyz";
             }
         }
 
@@ -691,7 +691,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
     for (i = 0; i < p0.head.author; i++) {
         if (p0.author[i].type == NSTYPE_SOA) {
-            p0.author[i].domain = "oil.cootail.com";
+            p0.author[i].domain = "oil.603030.xyz";
             p0.author[i].ttl = 7200;
         }
     }
@@ -762,9 +762,9 @@ int main(int argc, char *argv[])
 	const struct sockaddr_in6 *inp = &dnsaddr;
 	LOG_DEBUG("dns_build af=%d port=%d %s", inp->sin6_family, htons(inp->sin6_port), inet_ntop(AF_INET6, &inp->sin6_addr, buf, sizeof(buf)));
 
-	_predefine_resource_record[0].domain = "oil.cootail.com";
+	_predefine_resource_record[0].domain = "oil.603030.xyz";
 	_predefine_resource_record[0].type   = NSTYPE_NS;
-	*(char **)_predefine_resource_record[0].value  = "ns2.cootail.com";
+	*(char **)_predefine_resource_record[0].value  = "ns2.603030.xyz";
 
 	do {
 		FD_ZERO(&readfds);

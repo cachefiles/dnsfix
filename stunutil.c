@@ -419,7 +419,7 @@ static void load_stun_config(int argc, char *argv[])
 
 		ctx->request_target.sin6_family = AF_INET6;
 		ctx->request_target.sin6_port   = htons(d_port);
-		inet_p4ton6(&ctx->request_target.sin6_addr, target);
+		// inet_p4ton6(&ctx->request_target.sin6_addr, target);
 
 		fprintf(stderr, "%s ", argv[i]);
 

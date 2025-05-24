@@ -628,6 +628,8 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 				p1.head.ident += 0x1000;
 				p1.question[0].domain = add_domain(&p1, soa_nameserver);
 				dns_sendto(ctx->outfd, &p1, ctx->dnsaddr, ctx->dnslen);
+				p1.question[0].type   = NSTYPE_AAAA;
+				dns_sendto(ctx->outfd, &p1, ctx->dnsaddr, ctx->dnslen);
 				return 0;
 			}
 		}
@@ -772,7 +774,8 @@ check_flush:
 	return 0;
 }
 
-#define get_score_id(ifname) if_nametoindex(ifname)
+// #define get_score_id(ifname) if_nametoindex(ifname)
+#define get_score_id(ifname) 0
 
 int main(int argc, char *argv[])
 {

@@ -101,8 +101,8 @@ struct dns_resource _predefine_resource_record[] = {
 		.ttl = 36000,
 		.len = 4,
 		.flags = 0,
-		.domain = "mtalk.google.com",
-		.value = {10, 0, 3, 1}},
+		.domain = "example.com",
+		.value = {93, 184, 215, 14}},
 	{
 		.type = NSTYPE_A,
 		.klass = NSCLASS_INET,
@@ -149,6 +149,7 @@ int fetch_predefine_resource_record(struct dns_parser *parser)
 struct dns_context {
 	int outfd;
 	int sockfd;
+	int echofd;
 
 	socklen_t dnslen;
 	struct sockaddr_in6 *dnsaddr;
@@ -156,6 +157,8 @@ struct dns_context {
 
 struct dns_query_context {
 	uint32_t digest;
+	int server_status;
+	char cname[256];
 	struct sockaddr_in6 from;
 	struct dns_parser parser;
 };
@@ -163,6 +166,7 @@ struct dns_query_context {
 static struct dns_query_context _orig_list[0x1000];
 
 static struct sockaddr_in6 _ain6 = {};
+static struct sockaddr_in6 _cin6 = {};
 
 static int dns_parser_copy(struct dns_parser *dst, struct dns_parser *src)
 {
@@ -376,6 +380,14 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
         return -1;
     }
 
+    if (p0.head.question && p0.question[0].type == NSTYPE_A
+	    && !strcmp(p0.question[0].domain, "example.com")) {
+        LOG_DEBUG("FROM: %s keepalive %s", ntop6p(&from->sin6_addr), p0.question[0].domain);
+        // memcpy(ctx->dnsaddr, from, sizeof(*from));
+	// ctx->dnslen = sizeof(*from);
+	// ctx->echofd = ctx->sockfd;
+    }
+
     if (p0.head.question && fetch_predefine_resource_record(&p0)) {
         LOG_DEBUG("prefetch: %s", p0.question[0].domain);
         p0.head.flags |= NSFLAG_QR;
@@ -422,7 +434,8 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 
     const char *myzone = strcasestr(p0.question[0].domain, "oil.603030.xyz");
     if (myzone == NULL || strcasecmp(myzone, "oil.603030.xyz") || p0.question[0].type == NSTYPE_CNAME) {
-        p0.head.flags |= RCODE_NXDOMAIN;
+        // p0.head.flags |= RCODE_NXDOMAIN;
+        p0.head.flags |= RCODE_REFUSED;
         p0.head.flags |= NSFLAG_QR;
         dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
         return 0;
@@ -473,7 +486,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
         return 0;
     }
 
-    if (zone != NULL && strcasecmp(zone, "oil.603030.xyz") == 0) {
+    if (zone != NULL && strcasecmp(zone, "oil.603030.xyz") == 0 && (p0.question[0].type == NSTYPE_AAAA || p0.question[0].type == NSTYPE_A)) {
         p0.question[0] = p1->question[1];
         p0.head.flags &= ~NSFLAG_QR;
         p0.head.flags &= ~NSFLAG_RD;
@@ -489,7 +502,8 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
         p0.addon[0].len = 0;
         p0.head.addon = 1;
 
-        retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
+	int outfd = ctx->echofd == -1? ctx->outfd: ctx->echofd;
+        retval = dns_sendto(outfd, &p0, ctx->dnsaddr, ctx->dnslen);
         if (retval == -1) {
             LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
             return 0;
@@ -501,9 +515,21 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
             return 0;
         }
 
+        p0.head.flags |= NSFLAG_RD;
+        retval = dns_sendto(ctx->outfd, &p0, &_cin6, sizeof(_cin6));
+        if (retval == -1) {
+            LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsaddr);
+            return 0;
+        }
+
         *qc1 = qc0;
         qc1->digest = 0;
         dns_parser_copy(&qc1->parser, &qc0.parser);
+    } else {
+	    p0.head.flags |= RCODE_REFUSED;
+	    p0.head.flags |= NSFLAG_QR;
+	    dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+	    LOG_DEBUG("refused FROM: %s this is not good %d", p0.question[0].domain, p0.question[0].type);
     }
 
     return 0;
@@ -555,6 +581,14 @@ static uint32_t get_check_sum(void *buf, size_t count)
 	return cksum;
 }
 
+struct dns_alias {
+    char *name;
+};
+
+#define SS_CHINA 1
+#define SS_ONEED  2
+#define SS_REJECTED  8
+
 int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
 {
     int i;
@@ -574,6 +608,22 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
         return -1;
     }
 #endif
+    if (~p0.head.flags & 0x8000) {
+	if (p0.head.question && p0.question[0].type == NSTYPE_A
+		&& !strcmp(p0.question[0].domain, "example.com")) {
+	    LOG_DEBUG("FROM: %s keepalive %s", ntop6p(&from->sin6_addr), p0.question[0].domain);
+	    memcpy(ctx->dnsaddr, from, sizeof(*from));
+	    ctx->dnslen = sizeof(*from);
+	    ctx->echofd = ctx->outfd;
+	}
+
+	if (p0.head.question && fetch_predefine_resource_record(&p0)) {
+	    LOG_DEBUG("prefetch: %s", p0.question[0].domain);
+	    p0.head.flags |= NSFLAG_QR;
+	    dns_sendto(ctx->outfd, &p0, from, sizeof(*from));
+	    return 0;
+	}
+    }
 
     int offset = (p0.head.ident & 0xfff);
     struct dns_query_context *qc = &_orig_list[offset];
@@ -584,7 +634,77 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
         return -1;
     }
 
-    if (IN6_ARE_ADDR_EQUAL(&_ain6.sin6_addr, &from->sin6_addr)) {
+    if (IN6_ARE_ADDR_EQUAL(&_cin6.sin6_addr, &from->sin6_addr)) {
+	for (i = 0; i < p0.head.answer; i++) {
+            res = &p0.answer[i];
+            if (res->type == NSTYPE_CNAME) {
+		struct dns_alias * alias = (struct dns_alias *)res->value;
+		strcpy(qc->cname, alias->name);
+                break;
+	    }
+	}
+
+	qc->server_status |= SS_ONEED;
+	LOG_DEBUG("oneed server_status: %x :%s\n", qc->server_status, qc->cname);
+	if (qc->server_status == SS_ONEED) return 0;
+
+	p0.question[0] = pp->question[0];
+
+	p0.head.flags |= NSFLAG_QR;
+	p0.head.flags |= NSFLAG_RA;
+	p0.head.flags |= NSFLAG_RD;
+	p0.head.flags &= ~NSFLAG_RCODE;
+	p0.answer[0].klass = NSCLASS_INET;
+
+        p0.head.answer = 1;
+        p0.head.addon = 0;
+        p0.answer[0].domain = p0.question[0].domain;
+        p0.answer[0].type = p0.question[0].type;
+        p0.answer[0].ttl  = 7200;
+        p0.answer[0].klass = p0.question[0].klass;
+
+	if (p0.answer[0].type != NSTYPE_AAAA &&
+           p0.answer[0].type != NSTYPE_A) {
+           p0.head.answer = 0;
+        } else if (qc->server_status & SS_REJECTED) {
+            uint32_t fakeip = rand();
+            if (fakeip == 0x7f7f7f7f) fakeip = 0x1010101;
+            uint32_t list[4] = {fakeip, fakeip, fakeip, fakeip};
+            memcpy(p0.answer[0].value, list, 16);
+	} else if (*qc->cname) {
+	    int type;
+	    char buf[356];
+	    snprintf(buf, sizeof(buf), "%s.oil.603030.xyz", qc->cname);
+	    type = cache_get(buf);
+	    if (type == 0) {
+		p0.answer[0].type = NSTYPE_CNAME;
+		struct dns_alias *alias = (struct dns_alias *)p0.answer[0].value;
+		alias->name = add_domain(&p0, buf);
+	    } else if (type & 0x7f) {
+		uint32_t fakeip = rand();
+		if (fakeip == 0x7f7f7f7f) fakeip = 0x1010101;
+		uint32_t list[4] = {fakeip, fakeip, fakeip, fakeip};
+		memcpy(p0.answer[0].value, list, 16);
+                cache_add(p0.question[0].domain, STATUS_REJECT);
+	    } else if (p0.question[0].type == NSTYPE_AAAA) {
+                cache_add(p0.question[0].domain, STATUS_ALLOW);
+		memset(p0.answer[0].value, 0xfe, 16);
+	    } else {
+                cache_add(p0.question[0].domain, STATUS_ALLOW);
+		memset(p0.answer[0].value, 127, 16);
+	    }
+	} else {
+	    if (p0.question[0].type == NSTYPE_AAAA) {
+		memset(p0.answer[0].value, 0xfe, 16);
+	    } else {
+		memset(p0.answer[0].value, 127, 16);
+	    }
+	    cache_add(p0.question[0].domain, STATUS_ALLOW);
+	}
+
+	dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+	return 0;
+    } else if (IN6_ARE_ADDR_EQUAL(&_ain6.sin6_addr, &from->sin6_addr)) {
         int found = 0;
         uint64_t val = 0;
 
@@ -615,6 +735,10 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
             return -1;
         }
+	qc->server_status = (SS_ONEED| SS_CHINA);
+        qc->cname[0] = 0;
+    } else {
+	qc->server_status |= SS_CHINA;
     }
 
     uint32_t digest = get_check_sum(buf, 6 * 2);
@@ -666,12 +790,24 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
                     *(char **)p0.answer[i].value = "chinazone.603030.xyz";
             }
         }
+	if (*qc->cname && allow_mask) {
+	    char buf[356];
+	    p0.answer[0].type = NSTYPE_CNAME;
+	    snprintf(buf, sizeof(buf), "%s.oil.603030.xyz", qc->cname);
+	    struct dns_alias *alias = (struct dns_alias *)p0.answer[0].value;
+	    alias->name = add_domain(&p0, buf);
+	    p0.head.answer = 1;
+	}
 
         if (p0.head.flags & NSFLAG_RD) p0.head.flags |= NSFLAG_RA;
         p0.head.flags |= NSFLAG_AA;
         p0.head.flags &= ~NSFLAG_ZERO;
 
-        cache_add(p0.question[0].domain, allow_mask? STATUS_ALLOW: STATUS_REJECT);
+	if (!allow_mask) {
+	    qc->server_status |= SS_REJECTED;
+	    // cache_add(p0.question[0].domain, allow_mask? STATUS_ALLOW: STATUS_REJECT);
+	    cache_add(p0.question[0].domain, STATUS_REJECT);
+	}
     } else if (p0.question[0].type == NSTYPE_AAAA
             || p0.question[0].type == NSTYPE_A) {
         p0.answer[0].domain = p0.question[0].domain;
@@ -681,7 +817,16 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
             memset(p0.answer[0].value, 127, 4);
         if (p0.question[0].type == NSTYPE_AAAA)
             memset(p0.answer[0].value, 0xfe, 16);
-        cache_add(p0.question[0].domain, STATUS_ALLOW);
+
+	if (*qc->cname) {
+	    char buf[356];
+	    p0.answer[0].type = NSTYPE_CNAME;
+	    snprintf(buf, sizeof(buf), "%s.oil.603030.xyz", qc->cname);
+	    struct dns_alias *alias = (struct dns_alias *)p0.answer[0].value;
+	    alias->name = add_domain(&p0, buf);
+	}
+
+        // cache_add(p0.question[0].domain, STATUS_ALLOW);
 
         if (p0.head.flags & NSFLAG_RD) p0.head.flags |= NSFLAG_RA;
         p0.head.flags |= NSFLAG_AA;
@@ -699,7 +844,14 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
     p0.head.addon = 0;
     p0.head.author = 0;
 
-    dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+    int all_flasgs = (SS_ONEED| SS_CHINA);
+    LOG_DEBUG("server_status: %x :%s\n", qc->server_status, qc->cname);
+    if ((qc->server_status & all_flasgs) == all_flasgs) {
+	dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+	if ((~qc->server_status & SS_REJECTED) && 0 == *qc->cname)
+	    cache_add(p0.question[0].domain, STATUS_ALLOW);
+    }
+
     return 0;
 }
 
@@ -716,16 +868,21 @@ int main(int argc, char *argv[])
 	setenv("NAMESERVER", "2408:4009:501::2", 0);
 	setenv("LOCALADDR6", "2001:470:66:22a::2", 0);
 	setenv("ROOTSERVER", "::ffff:192.41.162.30", 0);
+	setenv("FOURONE", "::ffff:101:101", 0);
 
 	_ain6.sin6_family = AF_INET6;
 	_ain6.sin6_port   = htons(53);
 	inet_pton(AF_INET6, getenv("ROOTSERVER"), &_ain6.sin6_addr); 
 
+	_cin6.sin6_family = AF_INET6;
+	_cin6.sin6_port   = htons(53);
+	inet_pton(AF_INET6, getenv("FOURONE"), &_cin6.sin6_addr); 
+
 	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	assert(outfd != -1);
 
 	myaddr.sin6_family = AF_INET6;
-	myaddr.sin6_port   = 0;
+	myaddr.sin6_port   = htons(51623);
 	myaddr.sin6_addr   = in6addr_any;
 	retval = bind(outfd, paddr, sizeof(myaddr));
 	assert(retval != -1);
@@ -749,6 +906,7 @@ int main(int argc, char *argv[])
 	struct dns_context c0 = {
 		.outfd = outfd,
 		.sockfd = sockfd,
+		.echofd = -1,
 		.dnslen  = sizeof(dnsaddr),
 	};
 

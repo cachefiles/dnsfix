@@ -623,7 +623,7 @@ static const char *cache_add_domain(const char *domain)
 	char *limit = _strbuf + sizeof(_strbuf);
 
 	if (*domain == 0) {
-		fprintf(stderr, "dummy\n");
+		// fprintf(stderr, "dummy\n");
 		return _strbuf;
 	}
 

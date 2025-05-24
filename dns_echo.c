@@ -115,8 +115,8 @@ int main(int argc, char *argv[])
 	struct sockaddr_in6 myaddr6;
 	struct sockaddr * paddr6 = (struct sockaddr *)&myaddr6;
 
-    setenv("INCOMING", "0.0.0.0", 0);
-    setenv("OUTGOING", "8.8.8.8", 0);
+    setenv("INCOMING", "::ffff:0.0.0.0", 0);
+    setenv("OUTGOING", "::ffff:8.8.8.8", 0);
 
 	outfd = socket(AF_INET6, SOCK_DGRAM, 0);
 	assert(outfd != -1);

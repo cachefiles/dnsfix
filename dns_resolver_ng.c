@@ -13,6 +13,7 @@
 #include <sys/select.h>
 
 #include <netinet/in.h>
+#include <net/if.h>
 #include <arpa/nameser.h>
 #include <resolv.h>
 #include "dnsproto.h"
@@ -32,6 +33,7 @@
 static char addrbuf[256];
 #define ntop6(addr) inet_ntop(AF_INET6, &addr, addrbuf, sizeof(addrbuf))
 #define ntop6p(addr) inet_ntop(AF_INET6, addr, addrbuf, sizeof(addrbuf))
+#define MIN(a, b) ((a) < (b)? (a): (b))
 
 struct dns_resource _predefine_resource_record[] = {
 	{
@@ -340,6 +342,8 @@ static uint16_t dns_hash(const void *up, const char *domain)
 	return (total & 0xffff) + (total >> 16);
 }
 
+int update_preference(struct dns_score_board *, struct dns_query_context *, int );
+
 int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockaddr_in6 *from)
 {
 	struct dns_parser p0;
@@ -359,7 +363,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	if (fetch_predefine_resource_record(&p0)) {
 		LOG_DEBUG("prefetch: %s", p0.question[0].domain);
 		p0.head.flags |= NSFLAG_QR;
-		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)from, sizeof(*from));
 		return 0;
 	}
 	
@@ -392,7 +396,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	dns_parser_copy(&u1, &p0);
 	add_client_subnet(&u1, optbuf, &subnet4_data);
 
-	retval = dns_sendto(ctx->outfd, &u1, ctx->dnslocal, ctx->dnslen1);
+	retval = dns_sendto(ctx->outfd, &u1, (struct sockaddr *)ctx->dnslocal, ctx->dnslen1);
 	if (retval == -1) {
 		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnslocal);
 		return 0;
@@ -402,7 +406,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 		return 0;
 	}
 
-	retval = sendto(ctx->outfd, buf, count, 0, ctx->dnsremote, ctx->dnslen);
+	retval = sendto(ctx->outfd, buf, count, 0, (struct sockaddr *)ctx->dnsremote, ctx->dnslen);
 	if (retval == -1) {
 		LOG_DEBUG("dns_sendto failure: %s %p", strerror(errno), ctx->dnsremote);
 		return 0;
@@ -571,7 +575,7 @@ int update_preference(struct dns_score_board *sb, struct dns_query_context *qc, 
 		sb->updated = 1;
 	}
 
-    assert(qc->preference >= sb->preference);
+	assert(qc->preference >= sb->preference);
 	return 0;
 }
 
@@ -610,7 +614,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 
 	if (p0.question[0].type != NSTYPE_AAAA && p0.question[0].type != NSTYPE_A) {
 		LOG_DEBUG("skip domain: %s %s type=%d", ntop6(qc->from), pp->question[0].domain, p0.question[0].type);
-		dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 		return 0;
 	}
 
@@ -648,7 +652,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	if (suffixes && strcmp(suffixes, ".oil.cootail.com") == 0) {
 		if (!strcmp(p0.question[0].domain, pp->question[0].domain)) {
 			LOG_DEBUG("skip fake domain: %s %s", ntop6(qc->from), pp->question[0].domain);
-			dns_sendto(ctx->sockfd, &p0, &qc->from, sizeof(qc->from));
+			dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 			return 0;
 		}
 
@@ -717,7 +721,7 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 			p0.question[0].klass = NSCLASS_INET;
 			p0.question[0].type = NSTYPE_A;
 
-			dns_sendto(ctx->outfd, &p0, ctx->dnslocal, ctx->dnslen1);
+			dns_sendto(ctx->outfd, &p0, (struct sockaddr *)ctx->dnslocal, ctx->dnslen1);
 			return 0;
 		}
 
@@ -802,7 +806,7 @@ check_finish:
 					pp6->answer[i].domain = add_domain(pp6, p0.answer[i].domain);
 				}
 
-				struct dns_cname *cname = pp6->answer[i].value;
+				struct dns_cname *cname = (struct dns_cname *)pp6->answer[i].value;
 				if (pp6->answer[i].type == NSTYPE_CNAME) {
 					cname->alias = add_domain(pp6, cname->alias);
 				} else {
@@ -827,7 +831,7 @@ check_finish:
 				int save = pp->head.answer;
 				pp->head.answer = (!(qc4->flags & FLAG_BLOCK_IPV4) && (qc4->preference <= sb->preference))? pp->head.answer: 0;
 				LOG_DEBUG("ipv4: d=%s n=%d nat64_pref=%d", pp->question[0].domain, pp->head.answer, nat64_pref);
-				dns_sendto(ctx->sockfd, pp, &qc4->from, sizeof(qc4->from));
+				dns_sendto(ctx->sockfd, pp, (struct sockaddr *)&qc4->from, sizeof(qc4->from));
 				pp->head.answer = save;
 				if (nat64_pref < 100) qc4->nat64_pref = nat64_pref;
 			}
@@ -837,7 +841,7 @@ check_finish:
 				pp->head.flags |= NSFLAG_QR;
 				pp->head.answer = (qc6->preference <= sb->preference)? pp->head.answer: 0;
 				LOG_DEBUG("ipv6: d=%s n=%d", pp->question[0].domain, pp->head.answer);
-				dns_sendto(ctx->sockfd, pp, &qc6->from, sizeof(qc6->from));
+				dns_sendto(ctx->sockfd, pp, (struct sockaddr *)&qc6->from, sizeof(qc6->from));
 			}
 		}
 
@@ -865,7 +869,7 @@ check_finish:
 			res->ttl = 5;
 		}
 
-		dns_sendto(ctx->sockfd, &modp0, &qc->from, sizeof(qc->from));
+		dns_sendto(ctx->sockfd, &modp0, (struct sockaddr *)&qc->from, sizeof(qc->from));
 		pp = NULL;
 	}
 
@@ -948,7 +952,7 @@ int main(int argc, char *argv[])
 	dnslocal.sin6_family = AF_INET6;
 	dnslocal.sin6_port   = htons(53);
 	inet_pton(AF_INET6, getenv("NAMESERVER"), &dnslocal.sin6_addr);
-	c0.dnslocal = (struct sockaddr *)&dnslocal;
+	c0.dnslocal = &dnslocal;
 
 	dnsremote.sin6_family = AF_INET6;
 	dnsremote.sin6_port   = htons(53);
@@ -957,7 +961,7 @@ int main(int argc, char *argv[])
 	if (getenv("REMOTESERVER") != NULL) {
 	    inet_pton(AF_INET6, getenv("REMOTESERVER"), &dnsremote.sin6_addr);
 	    if (!IN6_ARE_ADDR_EQUAL(&dnsremote.sin6_addr, &dnslocal.sin6_addr))
-		c0.dnsremote = (struct sockaddr *)&dnsremote;
+		c0.dnsremote = &dnsremote;
 	}
 
 	const struct sockaddr_in6 *inp = (const struct sockaddr_in6 *)&dnslocal;

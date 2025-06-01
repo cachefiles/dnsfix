@@ -318,7 +318,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	if (fetch_predefine_resource_record(&p0)) {
 		LOG_DEBUG("prefetch: %s", p0.question[0].domain);
 		p0.head.flags |= NSFLAG_QR;
-		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)from, sizeof(*from));
 		return 0;
 	}
 	
@@ -344,7 +344,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 		p0.head.flags |= NSFLAG_QR;
 		p0.head.flags &= ~NSFLAG_RCODE;
 		p0.head.flags |= RCODE_NOTAUTH;
-		dns_sendto(ctx->sockfd, &p0, from, sizeof(*from));
+		dns_sendto(ctx->sockfd, &p0, (struct sockaddr *)from, sizeof(*from));
 		return -1;
 	}
 
@@ -361,7 +361,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	}
 
 	p0.head.flags |= NSFLAG_RD;
-	retval = dns_sendto(ctx->outfd, &p0, ctx->dnsaddr, ctx->dnslen);
+	retval = dns_sendto(ctx->outfd, &p0, (struct sockaddr *)ctx->dnsaddr, ctx->dnslen);
 	if (retval == -1) {
 		LOG_DEBUG("dns_sendto failure: %s target %p", strerror(errno), ctx->dnsaddr);
 		return 0;
@@ -578,10 +578,10 @@ int main(int argc, char *argv[])
 	inet_pton(AF_INET6, getenv("NAMESERVER"), &dnsaddr.sin6_addr);
 	// dnsaddr.sin_addr.s_addr = inet_addr("223.5.5.5");
 
-	c0.dnsaddr = (struct sockaddr *)&dnsaddr;
+	c0.dnsaddr = (struct sockaddr_in6 *)&dnsaddr;
 	LOG_DEBUG("nsaddr %p pointer %p %d", c0.dnsaddr, &dnsaddr, htons(dnsaddr.sin6_port));
 
-	const struct sockaddr_in6 *inp = (const struct sockaddr_in *)&dnsaddr;
+	const struct sockaddr_in6 *inp = (const struct sockaddr_in6 *)&dnsaddr;
 	LOG_DEBUG("dns_build bytes %d %d %d %s", 0, inp->sin6_family, htons(inp->sin6_port), ntop6(inp->sin6_addr));
 
 	do {

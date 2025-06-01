@@ -70,7 +70,7 @@ int do_dns_forward(struct dns_context *ctx, void *buf, int count, struct sockadd
 	memcpy(&ctx->last6[ident], from, sizeof(*from));
 
 	ctx->addrlen = sizeof(ctx->last6[0]);
-	ctx->last = &ctx->last6[ident];
+	ctx->last = (struct sockaddr *)&ctx->last6[ident];
 
 	int len;
 	char tmp[216];
@@ -92,12 +92,12 @@ int do_dns_backward(struct dns_context *ctx, void *buf, int count, struct sockad
 	uint16_t ident;
 	memcpy(&ident, buf, sizeof(ident));
 
-#define ADDR(s) (s->sin6_family == AF_INET6? &s->sin6_addr: &((struct sockaddr_in *)s)->sin_addr)
+#define ADDR(s) (s->sin6_family == AF_INET6? &s->sin6_addr: (struct in6_addr *)&((struct sockaddr_in *)s)->sin_addr)
 
 	LOG_DEBUG("%04x backward: af=%d/%d [%s]:%d %d", ident, from->sin6_family, AF_INET6,
 			inet_ntop(from->sin6_family, ADDR(from), tmp, 216), htons(from->sin6_port), count);
 
-	ctx->last = &ctx->last6[ident];
+	ctx->last = (struct sockaddr *)&ctx->last6[ident];
 	LOG_DEBUG("send: [%s]:%d %d", inet_ntop(AF_INET6, &ctx->last6[ident].sin6_addr, tmp, 216),
 			htons(ctx->last6[ident].sin6_port), count);
 

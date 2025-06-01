@@ -79,7 +79,7 @@ static int load_client_subnet(struct dns_parser *p0, struct sockaddr_in6 *from)
 				valp += sizeof(tag0) + htons(tag0.len);
 				len -= (sizeof(tag0) + htons(tag0.len));
 				if (tag0.tag == htons(0x0008)) {
-					info = hold;
+					info = (struct subnet_info *)hold;
 					break;
 				}
 			}

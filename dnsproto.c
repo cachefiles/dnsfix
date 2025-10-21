@@ -210,7 +210,7 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 					}
 
 				default:
-					return &frame[msglen];
+					return &frame[msglen + 1];
 			}
 		}
 
@@ -220,7 +220,7 @@ const uint8_t * rsc_verify_handle(struct dns_resource *res, struct dns_parser *p
 	}
 
 	fprintf(stderr, "unkown resource type: %d\n", res->type);
-	return &frame[msglen];
+	return &frame[msglen + 1];
 }
 
 #define GET_SHORT(v, p) v = ntohs(*(uint16_t *)p)
@@ -710,12 +710,12 @@ int cache_put(struct dns_resource *ress, size_t count)
 	return 0;
 }
 
+#if 0
 static int nstrtab = 0;
 static char *pstrtab[10240];
 static char _strbuf[1024 * 1024];
 static char *lastsym = _strbuf;
 
-#if 0
 static char *cache_lookup_domain(const char *domain)
 {
 	int i;
@@ -727,7 +727,6 @@ static char *cache_lookup_domain(const char *domain)
 
 	return NULL;
 }
-#endif
 
 static const char *cache_add_domain(const char *domain)
 {
@@ -751,6 +750,7 @@ static const char *cache_add_domain(const char *domain)
 
 	return self;
 }
+#endif
 
 int move_to_cache(struct dns_resource *ress, size_t count)
 {
